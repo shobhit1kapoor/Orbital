@@ -147,6 +147,7 @@ services:
       DATABASE_URL: postgresql+psycopg://orbital:orbital@postgres:5432/orbital
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
       EVIDENCE_RECONCILER_URL: http://evidence-reconciler:8000
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434/v1}
     ports: ["8002:8000"]
 
   mock-mcp-tool:
