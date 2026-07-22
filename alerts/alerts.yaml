@@ -1,0 +1,49 @@
+alerts:
+  - name: ORBITAL Uncertified Agent Execution
+    severity: critical
+    signal: traces
+    filter: "name = 'agent.mission' AND orbital.certificate.id NOT EXISTS"
+  - name: ORBITAL Artifact Drift
+    severity: critical
+    signal: traces
+    filter: "orbital.artifact.status = 'drifted'"
+  - name: ORBITAL Missing Authorization
+    severity: critical
+    signal: traces
+    trace_matching: "action.commit NOT policy.authorize[policy.decision=allow]"
+  - name: ORBITAL Evidence Mismatch
+    severity: critical
+    signal: traces
+    filter: "orbital.evidence.state = 'CONTRADICTED'"
+  - name: ORBITAL Unsafe External Effect
+    severity: critical
+    signal: traces
+    filter: "orbital.unsafe_effect = true"
+  - name: ORBITAL Certificate Expiration
+    severity: warning
+    signal: metrics
+    metric: orbital.certificate.seconds_remaining
+  - name: ORBITAL Canary Regression
+    severity: critical
+    signal: metrics
+    metric: orbital.canary.quality_delta
+  - name: ORBITAL Replay Fidelity Degradation
+    severity: warning
+    signal: metrics
+    metric: orbital.replay.fidelity
+  - name: ORBITAL Policy Bundle Mismatch
+    severity: critical
+    signal: traces
+    filter: "orbital.policy.status = 'mismatch'"
+  - name: ORBITAL High Causal Fragility
+    severity: warning
+    signal: metrics
+    metric: orbital.causal.fragility
+  - name: ORBITAL OBI Sensor Loss
+    severity: critical
+    signal: metrics
+    metric: orbital.sensor.obi.healthy
+  - name: ORBITAL Telemetry Cardinality Explosion
+    severity: warning
+    signal: metrics
+    metric: orbital.telemetry.cardinality

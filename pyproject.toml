@@ -1,0 +1,21 @@
+[project]
+name = "orbital-sigma"
+version = "0.1.0"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+pythonpath = [
+  "packages/shared-models/python",
+  "packages/mission-contract-sdk/python",
+  "packages/capability-tokens/python",
+  "packages/orbital-semconv/python"
+]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

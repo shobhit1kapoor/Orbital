@@ -1,0 +1,16 @@
+{
+  "title": "ORBITAL Σ — Certified Production",
+  "description": "Certified traffic, artifact drift, trust decay, certificate state and automated rollback.",
+  "tags": ["orbital", "watchtower", "production"],
+  "variables": {},
+  "layout": [
+    {"i": "traffic", "x": 0, "y": 0, "w": 6, "h": 4},
+    {"i": "drift", "x": 6, "y": 0, "w": 6, "h": 4},
+    {"i": "rollback", "x": 0, "y": 4, "w": 12, "h": 5}
+  ],
+  "widgets": [
+    {"id": "traffic", "title": "Certified traffic ratio", "panelTypes": "graph", "query": {"signal": "metrics", "metricName": "orbital.certified_traffic_ratio"}},
+    {"id": "drift", "title": "Artifact drift rate", "panelTypes": "graph", "query": {"signal": "traces", "aggregation": "count", "filter": "orbital.artifact.status = 'drifted'"}},
+    {"id": "rollback", "title": "Revocation and rollback timeline", "panelTypes": "table", "query": {"signal": "traces", "filter": "name IN ('certificate.suspend','rollout.change')"}}
+  ]
+}

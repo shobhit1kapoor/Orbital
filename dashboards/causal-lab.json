@@ -1,0 +1,16 @@
+{
+  "title": "ORBITAL Σ — Causal Lab",
+  "description": "Counterfactual replay branches, intervention contributions and minimized regression capsules.",
+  "tags": ["orbital", "fork", "causal"],
+  "variables": {},
+  "layout": [
+    {"i": "contributions", "x": 0, "y": 0, "w": 8, "h": 5},
+    {"i": "fragility", "x": 8, "y": 0, "w": 4, "h": 5},
+    {"i": "branches", "x": 0, "y": 5, "w": 12, "h": 5}
+  ],
+  "widgets": [
+    {"id": "contributions", "title": "Causal contribution", "panelTypes": "bar", "query": {"signal": "traces", "aggregation": "avg", "aggregateOn": "orbital.causal.contribution", "groupBy": "orbital.causal.factor"}},
+    {"id": "fragility", "title": "Causal fragility index", "panelTypes": "value", "query": {"signal": "traces", "aggregation": "avg", "aggregateOn": "orbital.causal.fragility"}},
+    {"id": "branches", "title": "Counterfactual replay branches", "panelTypes": "table", "query": {"signal": "traces", "filter": "name = 'replay.execute' AND orbital.execution.mode = 'counterfactual'"}}
+  ]
+}

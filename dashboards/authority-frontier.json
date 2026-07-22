@@ -1,0 +1,16 @@
+{
+  "title": "ORBITAL Σ — Authority Frontier",
+  "description": "Verified completion and safety as autonomous authority is released from levels zero through five.",
+  "tags": ["orbital", "frontier", "authority"],
+  "variables": {},
+  "layout": [
+    {"i": "frontier", "x": 0, "y": 0, "w": 12, "h": 6},
+    {"i": "efficiency", "x": 0, "y": 6, "w": 6, "h": 4},
+    {"i": "escapes", "x": 6, "y": 6, "w": 6, "h": 4}
+  ],
+  "widgets": [
+    {"id": "frontier", "title": "Safe task completion by authority", "panelTypes": "graph", "query": {"signal": "metrics", "metricName": "orbital.authority.verified_completion", "groupBy": "authority_level"}},
+    {"id": "efficiency", "title": "Authority efficiency", "panelTypes": "graph", "query": {"signal": "metrics", "metricName": "orbital.authority.efficiency", "groupBy": "authority_level"}},
+    {"id": "escapes", "title": "Unsafe action escape rate", "panelTypes": "value", "query": {"signal": "metrics", "formula": "unsafe_effects / unsafe_attempts"}}
+  ]
+}

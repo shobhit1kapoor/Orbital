@@ -1,0 +1,18 @@
+{
+  "title": "ORBITAL Σ — Flight Readiness",
+  "description": "GO, CONDITIONAL, NO-GO and UNKNOWN readiness evidence for autonomous agent candidates.",
+  "tags": ["orbital", "agent-assurance", "certification"],
+  "variables": {"candidate_id": {"type": "text", "defaultValue": "candidate-v2-fixed"}},
+  "layout": [
+    {"i": "verdicts", "x": 0, "y": 0, "w": 6, "h": 4},
+    {"i": "task-success", "x": 6, "y": 0, "w": 6, "h": 4},
+    {"i": "latency", "x": 0, "y": 4, "w": 6, "h": 4},
+    {"i": "cost", "x": 6, "y": 4, "w": 6, "h": 4}
+  ],
+  "widgets": [
+    {"id": "verdicts", "title": "Certificate verdicts", "panelTypes": "bar", "query": {"signal": "traces", "aggregation": "count", "groupBy": "orbital.certificate.verdict", "filter": "name = 'certificate.issue'"}},
+    {"id": "task-success", "title": "Verified task success", "panelTypes": "value", "query": {"signal": "traces", "aggregation": "count", "filter": "orbital.mission.outcome = 'verified_success'"}},
+    {"id": "latency", "title": "Mission p95 latency", "panelTypes": "graph", "query": {"signal": "traces", "aggregation": "p95", "aggregateOn": "durationNano", "filter": "name = 'agent.mission'"}},
+    {"id": "cost", "title": "Cost per verified resolution", "panelTypes": "graph", "query": {"signal": "traces", "aggregation": "avg", "aggregateOn": "orbital.cost.usd", "filter": "name = 'agent.mission'"}}
+  ]
+}

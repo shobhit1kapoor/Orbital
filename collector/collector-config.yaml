@@ -1,0 +1,79 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
+  transform/privacy:
+    error_mode: ignore
+    trace_statements:
+      - context: span
+        statements:
+          - delete_key(attributes, "raw_prompt")
+          - delete_key(attributes, "chain_of_thought")
+          - delete_key(attributes, "capability_token")
+          - delete_key(attributes, "payment_credentials")
+          - delete_key(attributes, "customer_email")
+          - delete_key(attributes, "customer_name")
+  tail_sampling:
+    decision_wait: 5s
+    num_traces: 100000
+    expected_new_traces_per_sec: 1000
+    policies:
+      - name: high-risk
+        type: string_attribute
+        string_attribute:
+          key: orbital.risk.class
+          values: [high, critical, financial_irreversible]
+      - name: evidence-mismatch
+        type: string_attribute
+        string_attribute:
+          key: orbital.evidence.state
+          values: [CONTRADICTED, UNKNOWN]
+      - name: certificate-events
+        type: string_attribute
+        string_attribute:
+          key: orbital.signal.class
+          values: [certificate, drift, rollback]
+      - name: routine-sample
+        type: probabilistic
+        probabilistic:
+          sampling_percentage: 5
+  batch:
+    timeout: 2s
+    send_batch_size: 2048
+
+exporters:
+  otlp/signoz:
+    endpoint: ${env:SIGNOZ_OTLP_ENDPOINT}
+    tls:
+      insecure: true
+  debug:
+    verbosity: basic
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, transform/privacy, tail_sampling, batch]
+      exporters: [otlp/signoz, debug]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp/signoz]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp/signoz]

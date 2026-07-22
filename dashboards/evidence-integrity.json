@@ -1,0 +1,16 @@
+{
+  "title": "ORBITAL Σ — Evidence Integrity",
+  "description": "Semantic, OBI, policy and effect-receipt parity for consequential actions.",
+  "tags": ["orbital", "parallax", "evidence"],
+  "variables": {},
+  "layout": [
+    {"i": "states", "x": 0, "y": 0, "w": 6, "h": 4},
+    {"i": "missing-auth", "x": 6, "y": 0, "w": 6, "h": 4},
+    {"i": "mismatches", "x": 0, "y": 4, "w": 12, "h": 5}
+  ],
+  "widgets": [
+    {"id": "states", "title": "Evidence states", "panelTypes": "pie", "query": {"signal": "traces", "aggregation": "count", "groupBy": "orbital.evidence.state"}},
+    {"id": "missing-auth", "title": "Commits without authorization", "panelTypes": "value", "query": {"signal": "traces", "traceMatching": "action.commit NOT policy.authorize"}},
+    {"id": "mismatches", "title": "Semantic versus observed effects", "panelTypes": "table", "query": {"signal": "traces", "filter": "orbital.evidence.state = 'CONTRADICTED'", "groupBy": "orbital.action.type,orbital.observed.action"}}
+  ]
+}

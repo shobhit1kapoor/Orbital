@@ -1,0 +1,11 @@
+{
+  "name": "orbital-sigma",
+  "private": true,
+  "packageManager": "pnpm@11.9.0",
+  "scripts": {
+    "dev": "pnpm --filter mission-control dev",
+    "build": "pnpm --filter mission-control build",
+    "lint": "pnpm --filter mission-control lint",
+    "test:e2e": "pnpm --filter mission-control test:e2e"
+  }
+}

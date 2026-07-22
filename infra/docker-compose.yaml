@@ -1,0 +1,204 @@
+x-service: &python-service
+  build:
+    context: ..
+    dockerfile: infra/Dockerfile.service
+  env_file:
+    - path: ../.env
+      required: false
+  restart: unless-stopped
+  networks: [orbital]
+  depends_on:
+    postgres: { condition: service_healthy }
+    redis: { condition: service_healthy }
+    otel-collector: { condition: service_started }
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: orbital
+      POSTGRES_PASSWORD: orbital
+      POSTGRES_DB: orbital
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orbital"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    volumes: ["postgres-data:/var/lib/postgresql/data"]
+    networks: [orbital]
+
+  redis:
+    image: redis:8-alpine
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    volumes: ["redis-data:/data"]
+    networks: [orbital]
+
+  minio:
+    image: minio/minio:RELEASE.2025-07-23T15-54-02Z
+    command: server /data --console-address :9001
+    environment:
+      MINIO_ROOT_USER: orbital
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-orbital-development-secret}
+    ports: ["9000:9000", "9001:9001"]
+    volumes: ["minio-data:/data"]
+    networks: [orbital]
+
+  opa:
+    image: openpolicyagent/opa:1.7.1-static
+    command: ["run", "--server", "--log-format=json", "/policies"]
+    volumes: ["../policies:/policies:ro"]
+    ports: ["8181:8181"]
+    networks: [orbital]
+
+  ollama:
+    image: ollama/ollama:0.11.2
+    volumes: ["ollama-data:/root/.ollama"]
+    ports: ["11434:11434"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    networks: [orbital]
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.130.0
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes: ["../collector/collector-config.yaml:/etc/otelcol/config.yaml:ro"]
+    ports: ["14317:4317", "14318:4318", "13133:13133"]
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    networks: [orbital]
+
+  signoz-mcp:
+    image: signoz/signoz-mcp-server:latest
+    environment:
+      TRANSPORT_MODE: http
+      MCP_SERVER_PORT: 8000
+      SIGNOZ_URL: http://host.docker.internal:8080
+      SIGNOZ_API_KEY: ${SIGNOZ_API_KEY}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      LOG_LEVEL: info
+    ports: ["18000:8000"]
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    depends_on: [otel-collector]
+    networks: [orbital]
+
+  control-plane:
+    <<: *python-service
+    build: { context: .., dockerfile: infra/Dockerfile.service, args: { SERVICE: control-plane } }
+    ports: ["8001:8000"]
+
+  agent-runtime:
+    <<: *python-service
+    build: { context: .., dockerfile: infra/Dockerfile.service, args: { SERVICE: agent-runtime } }
+    ports: ["8002:8000"]
+
+  mock-mcp-tool:
+    <<: *python-service
+    build: { context: .., dockerfile: infra/Dockerfile.service, args: { SERVICE: agent-runtime } }
+    command: ["sh", "-c", "cd /workspace/services/agent-runtime && uvicorn mock_tool:app --host 0.0.0.0 --port 8000"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://orbital:orbital@postgres:5432/orbital
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      REFUND_FIXTURE_URL: http://mock-refund-service:8000
+      LOCAL_FIXTURE_KEY: ${LOCAL_FIXTURE_KEY:-orbital-local-fixture}
+    ports: ["8011:8000"]
+
+  mock-refund-service:
+    <<: *python-service
+    build: { context: .., dockerfile: infra/Dockerfile.service, args: { SERVICE: action-gateway } }
+    command: ["sh", "-c", "cd /workspace/services/action-gateway && uvicorn mock_refund:app --host 0.0.0.0 --port 8000"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://orbital:orbital@postgres:5432/orbital
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      LOCAL_FIXTURE_KEY: ${LOCAL_FIXTURE_KEY:-orbital-local-fixture}
+    ports: ["8012:8000"]
+
+  action-gateway:
+    <<: *python-service
+    build: { context: .., dockerfile: infra/Dockerfile.service, args: { SERVICE: action-gateway } }
+    volumes: ["../secrets:/workspace/secrets"]
+    ports: ["8003:8000"]
+
+  evidence-reconciler:
+    <<: *python-service
+    build: { context: .., dockerfile: infra/Dockerfile.service, args: { SERVICE: evidence-reconciler } }
+    ports: ["8004:8000"]
+
+  capsule-builder:
+    <<: *python-service
+    build: { context: .., dockerfile: infra/Dockerfile.service, args: { SERVICE: capsule-builder } }
+    volumes: ["../missions:/workspace/missions"]
+    ports: ["8005:8000"]
+
+  replay-orchestrator:
+    <<: *python-service
+    build: { context: .., dockerfile: infra/Dockerfile.service, args: { SERVICE: replay-orchestrator } }
+    ports: ["8006:8000"]
+
+  adversarial-foundry:
+    <<: *python-service
+    build: { context: .., dockerfile: infra/Dockerfile.service, args: { SERVICE: adversarial-foundry } }
+    ports: ["8007:8000"]
+
+  causal-engine:
+    <<: *python-service
+    build: { context: .., dockerfile: infra/Dockerfile.service, args: { SERVICE: causal-engine } }
+    ports: ["8008:8000"]
+
+  certifier:
+    <<: *python-service
+    build: { context: .., dockerfile: infra/Dockerfile.service, args: { SERVICE: certifier } }
+    volumes: ["../secrets:/workspace/secrets"]
+    ports: ["8009:8000"]
+
+  watchtower:
+    <<: *python-service
+    build: { context: .., dockerfile: infra/Dockerfile.service, args: { SERVICE: watchtower } }
+    ports: ["8010:8000"]
+
+  mission-control:
+    build:
+      context: ..
+      dockerfile: apps/mission-control/Dockerfile
+    environment:
+      CONTROL_PLANE_URL: http://control-plane:8000
+      AGENT_RUNTIME_URL: http://agent-runtime:8000
+      EVIDENCE_RECONCILER_URL: http://evidence-reconciler:8000
+      WATCHTOWER_URL: http://watchtower:8000
+      CAUSAL_ENGINE_URL: http://causal-engine:8000
+      CERTIFIER_URL: http://certifier:8000
+    ports: ["3000:3000"]
+    depends_on: [control-plane, evidence-reconciler, watchtower]
+    networks: [orbital]
+
+  obi:
+    image: otel/ebpf-instrument:v0.10.0
+    profiles: ["obi"]
+    pid: host
+    privileged: true
+    environment:
+      OTEL_EBPF_OPEN_PORT: "8001-8012"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+      OTEL_EBPF_KUBE_METADATA_ENABLE: "false"
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:ro
+      - /sys/fs/bpf:/sys/fs/bpf
+    networks: [orbital]
+
+networks:
+  orbital: { name: orbital-sigma }
+
+volumes:
+  postgres-data:
+  redis-data:
+  minio-data:
+  ollama-data:
