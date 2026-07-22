@@ -77,7 +77,12 @@ SELECT
     countIf(attributes_string['orbital.receipt.signature_algorithm'] = 'Ed25519')
         AS signed_receipts
 FROM signoz_traces.distributed_signoz_index_v3
-WHERE timestamp > now() - INTERVAL 5 MINUTE
+-- Health is a liveness assertion, not a statement that OBI emitted at some
+-- point in the recent past. Project health checks generate local traffic at
+-- least every few seconds, so an absence of OBI spans for 15 seconds means
+-- the independent evidence plane is unavailable and certification must be
+-- UNKNOWN.
+WHERE timestamp > now() - INTERVAL 15 SECOND
 FORMAT JSON
 """
 
