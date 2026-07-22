@@ -4,7 +4,7 @@ COMPOSE := docker compose --env-file .env -f infra/docker-compose.yaml
 .PHONY: bootstrap dev down seed certify hero-demo inject-drift verify verify-obi reset-demo test build signoz provision-signoz
 
 bootstrap:
-	./demo/bootstrap.sh
+	bash ./demo/bootstrap.sh
 
 signoz:
 	foundryctl cast -f casting.yaml
