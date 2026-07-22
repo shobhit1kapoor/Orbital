@@ -27,7 +27,11 @@ if ! grep -q '^SIGNOZ_ADMIN_PASSWORD=' .env; then
   printf 'SIGNOZ_ADMIN_PASSWORD=Orbital!%sA1\n' "$(openssl rand -hex 20)" >> .env
 fi
 
+ollama_mode="${ORBITAL_OLLAMA_MODE:-local}"
 compose=(docker compose --env-file .env -f infra/docker-compose.yaml)
+if [[ "${ollama_mode}" == "local" ]]; then
+  compose+=(--profile local-llm)
+fi
 
 foundryctl cast -f casting.yaml
 "${compose[@]}" up --build -d
@@ -37,7 +41,11 @@ foundryctl cast -f casting.yaml
   -e ORBITAL_ENV_FILE=/workspace/.env \
   demo-runner python /workspace/demo/bootstrap_signoz.py
 "${compose[@]}" up -d --force-recreate signoz-mcp
-"${compose[@]}" exec -T ollama ollama pull qwen3:8b
+if [[ "${ollama_mode}" == "local" ]]; then
+  "${compose[@]}" exec -T ollama ollama pull qwen3:8b
+else
+  echo "Ollama mode: ${ollama_mode}; no Ollama container or model is installed."
+fi
 "${compose[@]}" --profile tools run --rm \
   demo-runner python /workspace/demo/wait_for_services.py
 "${compose[@]}" --profile tools run --rm \

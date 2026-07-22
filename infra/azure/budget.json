@@ -1,0 +1,24 @@
+{
+  "properties": {
+    "category": "Cost",
+    "amount": 75,
+    "timeGrain": "Monthly",
+    "timePeriod": {
+      "startDate": "2026-07-01T00:00:00Z",
+      "endDate": "2027-07-01T00:00:00Z"
+    },
+    "notifications": {
+      "Actual_GreaterThanOrEqualTo_100_Percent": {
+        "enabled": true,
+        "operator": "GreaterThanOrEqualTo",
+        "threshold": 100,
+        "thresholdType": "Actual",
+        "contactEmails": [],
+        "contactGroups": [],
+        "contactRoles": [
+          "Owner"
+        ]
+      }
+    }
+  }
+}

@@ -7,6 +7,8 @@ x-service: &python-service
       required: false
   restart: unless-stopped
   networks: [orbital]
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
   depends_on:
     postgres: { condition: service_healthy }
     redis: { condition: service_healthy }
@@ -79,6 +81,7 @@ services:
 
   ollama:
     image: ollama/ollama:0.11.2
+    profiles: ["local-llm"]
     environment:
       OLLAMA_CONTEXT_LENGTH: "8192"
     volumes: ["ollama-data:/root/.ollama"]
