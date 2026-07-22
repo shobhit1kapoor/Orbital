@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 COMPOSE := docker compose --env-file .env -f infra/docker-compose.yaml
 
-.PHONY: bootstrap dev down seed certify hero-demo inject-drift verify reset-demo test build signoz provision-signoz
+.PHONY: bootstrap dev down seed certify hero-demo inject-drift verify verify-obi reset-demo test build signoz provision-signoz
 
 bootstrap:
 	./demo/bootstrap.sh
@@ -41,6 +41,16 @@ build:
 verify: test build
 	$(COMPOSE) config --quiet
 	$(COMPOSE) run --rm --no-deps otel-collector validate --config=/etc/otelcol/config.yaml
+
+verify-obi:
+	@test "$$(uname -s)" = "Linux" || (echo "OBI requires Linux"; exit 1)
+	@test -r /sys/kernel/btf/vmlinux || (echo "OBI requires kernel BTF at /sys/kernel/btf/vmlinux"; exit 1)
+	@mountpoint -q /sys/fs/bpf || (echo "bpffs is not mounted; run: sudo mount -t bpf bpf /sys/fs/bpf"; exit 1)
+	$(COMPOSE) --profile obi up -d opa agent-runtime mock-mcp-tool mock-refund-service evidence-reconciler
+	$(COMPOSE) --profile obi up -d obi
+	@sleep 8
+	$(COMPOSE) --profile tools build demo-runner
+	$(COMPOSE) --profile tools run --rm --no-deps demo-runner python /workspace/demo/verify_obi.py
 
 reset-demo:
 	$(COMPOSE) down --remove-orphans

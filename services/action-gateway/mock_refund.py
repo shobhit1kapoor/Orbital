@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
 from fastapi import Header, HTTPException
+from orbital_capabilities import CapabilityIssuer
 from orbital_semconv import ATTRIBUTES, SPANS, traced
 from orbital_shared.api import create_service
 from orbital_shared.models import Correlation, ToolReceipt, sha256_digest
@@ -13,6 +15,9 @@ from pydantic import BaseModel
 app = create_service("ORBITAL Σ Local Mock Refund Fixture", "orbital-mock-refund-service")
 FIXTURE_KEY = os.getenv("LOCAL_FIXTURE_KEY", "orbital-local-fixture")
 receipts: dict[str, ToolReceipt] = {}
+receipt_issuer = CapabilityIssuer.load_or_create(
+    Path(os.getenv("EFFECT_RECEIPT_SIGNING_KEY", "/workspace/secrets/effect-receipt.key"))
+)
 
 
 class SyntheticRefundRequest(BaseModel):
@@ -49,7 +54,7 @@ def issue_synthetic_refund(
         "orbital.fixture.synthetic": True,
         "orbital.refund.amount": request.amount,
     }
-    with traced(SPANS["commit"], attributes):
+    with traced(SPANS["commit"], attributes) as effect_span:
         result = {
             "order_id": request.order_id,
             "amount": request.amount,
@@ -61,7 +66,18 @@ def issue_synthetic_refund(
             amount=request.amount,
             external_reference=result["external_reference"],
             result_hash=sha256_digest(result),
-            signature=sha256_digest({"fixture": True, **result}),
         )
+        receipt.signature = receipt_issuer.signing_key.sign(
+            receipt.digest.encode()
+        ).signature.hex()
+        effect_span.set_attribute("orbital.receipt.id", receipt.receipt_id)
+        effect_span.set_attribute("orbital.receipt.digest", receipt.digest)
+        effect_span.set_attribute("orbital.receipt.signature", receipt.signature)
+        effect_span.set_attribute("orbital.receipt.public_key", receipt_issuer.public_key)
+        effect_span.set_attribute("orbital.receipt.signature_algorithm", "Ed25519")
         receipts[idempotency_key] = receipt
-    return {"receipt": receipt.model_dump(mode="json"), "fixture_only": True}
+    return {
+        "receipt": receipt.model_dump(mode="json"),
+        "receipt_public_key": receipt_issuer.public_key,
+        "fixture_only": True,
+    }

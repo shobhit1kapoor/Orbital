@@ -67,7 +67,7 @@ services:
 
   opa:
     image: openpolicyagent/opa:1.7.1-static
-    command: ["run", "--server", "--log-format=json", "/policies"]
+    command: ["run", "--server", "--addr=0.0.0.0:8181", "--log-format=json", "/policies"]
     volumes: ["../policies:/policies:ro"]
     ports: ["8181:8181"]
     healthcheck:
@@ -140,6 +140,10 @@ services:
   agent-runtime:
     <<: *python-service
     build: { context: .., dockerfile: infra/Dockerfile.service, args: { SERVICE: agent-runtime } }
+    environment:
+      DATABASE_URL: postgresql+psycopg://orbital:orbital@postgres:5432/orbital
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      EVIDENCE_RECONCILER_URL: http://evidence-reconciler:8000
     ports: ["8002:8000"]
 
   mock-mcp-tool:
@@ -149,6 +153,8 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://orbital:orbital@postgres:5432/orbital
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_SERVICE_NAME: orbital-mock-mcp-tool
+      OTEL_RESOURCE_ATTRIBUTES: service.namespace=orbital-sigma,deployment.environment=local
       REFUND_FIXTURE_URL: http://mock-refund-service:8000
       LOCAL_FIXTURE_KEY: ${LOCAL_FIXTURE_KEY:-orbital-local-fixture}
     ports: ["8011:8000"]
@@ -160,7 +166,11 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://orbital:orbital@postgres:5432/orbital
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_SERVICE_NAME: orbital-mock-refund-service
+      OTEL_RESOURCE_ATTRIBUTES: service.namespace=orbital-sigma,deployment.environment=local
       LOCAL_FIXTURE_KEY: ${LOCAL_FIXTURE_KEY:-orbital-local-fixture}
+      EFFECT_RECEIPT_SIGNING_KEY: /workspace/secrets/effect-receipt.key
+    volumes: ["../secrets:/workspace/secrets"]
     ports: ["8012:8000"]
 
   action-gateway:
@@ -172,6 +182,13 @@ services:
   evidence-reconciler:
     <<: *python-service
     build: { context: .., dockerfile: infra/Dockerfile.service, args: { SERVICE: evidence-reconciler } }
+    environment:
+      DATABASE_URL: postgresql+psycopg://orbital:orbital@postgres:5432/orbital
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      SIGNOZ_CLICKHOUSE_URL: http://orbital-telemetrystore-clickhouse-0-0:8123
+      SIGNOZ_PUBLIC_URL: http://localhost:8080
+      OPA_URL: http://opa:8181
+    networks: [orbital, signoz]
     ports: ["8004:8000"]
 
   capsule-builder:
@@ -282,14 +299,15 @@ services:
   obi:
     image: otel/ebpf-instrument:v0.10.0
     profiles: ["obi"]
+    init: true
     pid: host
     privileged: true
     environment:
-      OTEL_EBPF_OPEN_PORT: "8001-8012"
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
-      OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+      OTEL_EBPF_CONFIG_PATH: /etc/obi/config.yaml
+      OTEL_EBPF_ENFORCE_SYS_CAPS: "true"
       OTEL_EBPF_KUBE_METADATA_ENABLE: "false"
     volumes:
+      - ../collector/obi-config.yaml:/etc/obi/config.yaml:ro
       - /sys/fs/cgroup:/sys/fs/cgroup:ro
       - /sys/fs/bpf:/sys/fs/bpf
     networks: [orbital]

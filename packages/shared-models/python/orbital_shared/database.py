@@ -4,8 +4,21 @@ import os
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, DateTime, Integer, String, create_engine, select
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    Integer,
+    String,
+    create_engine,
+    select,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
+
+# Stable, project-specific PostgreSQL advisory-lock key. Every API process starts
+# concurrently during bootstrap, so schema creation must be serialized until
+# Alembic becomes the sole migration owner.
+_SCHEMA_LOCK_KEY = 0x4F52424954414C  # ASCII "ORBITAL"
 
 
 class Base(DeclarativeBase):
@@ -47,7 +60,15 @@ def engine_from_env():
 class ObjectStore:
     def __init__(self) -> None:
         self.engine = engine_from_env()
-        Base.metadata.create_all(self.engine)
+        self._initialize_schema()
+
+    def _initialize_schema(self) -> None:
+        with self.engine.begin() as connection:
+            if connection.dialect.name == "postgresql":
+                connection.exec_driver_sql(
+                    "SELECT pg_advisory_xact_lock(%s)", (_SCHEMA_LOCK_KEY,)
+                )
+            Base.metadata.create_all(connection)
 
     def put(self, object_id: str, kind: str, payload: dict[str, Any], created_at: datetime) -> None:
         with Session(self.engine) as session:

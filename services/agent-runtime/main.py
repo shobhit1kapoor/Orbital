@@ -15,6 +15,9 @@ from pydantic import BaseModel
 app = create_service("ORBITAL Σ Agent Runtime", "orbital-agent-runtime")
 GATEWAY_URL = os.getenv("ACTION_GATEWAY_URL", "http://action-gateway:8000")
 MOCK_MCP_URL = os.getenv("MOCK_MCP_URL", "http://mock-mcp-tool:8000")
+EVIDENCE_RECONCILER_URL = os.getenv(
+    "EVIDENCE_RECONCILER_URL", "http://evidence-reconciler:8000"
+)
 
 
 class MissionRequest(BaseModel):
@@ -254,11 +257,17 @@ def agent_artifacts(candidate: str) -> dict[str, Any]:
 
 @app.get("/v1/health/sensors")
 def sensor_health() -> dict[str, Any]:
-    return {
-        "semantic_sdk": True,
-        "policy": True,
-        "tool_receipts": True,
-        "obi": os.getenv("OBI_REQUIRED", "false").lower() != "true"
-        or os.getenv("OBI_HEALTHY", "true").lower() == "true",
-        "complete": True,
-    }
+    try:
+        response = httpx.get(f"{EVIDENCE_RECONCILER_URL}/v1/health/sensors", timeout=3)
+        response.raise_for_status()
+        return response.json()
+    except (httpx.HTTPError, ValueError):
+        return {
+            "semantic_sdk": False,
+            "policy": False,
+            "tool_receipts": False,
+            "obi": False,
+            "signoz": False,
+            "complete": False,
+            "state": "UNKNOWN",
+        }

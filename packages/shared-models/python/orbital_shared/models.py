@@ -223,6 +223,7 @@ class EvidenceClaim(AssuranceModel):
     obi_observed: bool | None = None
     state: EvidenceState
     reasons: list[str] = Field(default_factory=list)
+    evidence_links: list[str] = Field(default_factory=list)
 
 
 class EvidenceParityResult(AssuranceModel):

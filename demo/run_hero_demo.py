@@ -87,18 +87,11 @@ def hidden_failure() -> dict[str, Any]:
             "execution_mode": "recorded_replay",
         },
     )
-    receipt = mission["result"]["receipt"]
     evidence = post(
         "evidence",
         "/v1/evidence/reconcile",
         {
             "correlation": mission["correlation"],
-            "semantic_action": mission["semantic_action"],
-            "observed_action": receipt["tool"],
-            "policy_allowed": None,
-            "receipt_verified": True,
-            "obi_observed": True,
-            "required_sensors_available": True,
         },
     )
     return {"mission": mission, "evidence": evidence}
