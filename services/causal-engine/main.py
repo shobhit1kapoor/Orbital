@@ -5,6 +5,7 @@ from collections import defaultdict
 from typing import Any
 
 import numpy as np
+from orbital_semconv import ATTRIBUTES, traced
 from orbital_shared.api import create_service
 from orbital_shared.database import ObjectStore
 from orbital_shared.models import CausalContribution, CausalFinding
@@ -99,6 +100,32 @@ def analyze(request: AnalyzeRequest) -> dict[str, Any]:
     store.put(
         finding.finding_id, "causal_finding", finding.model_dump(mode="json"), finding.created_at
     )
+    with traced(
+        "causal.analyze",
+        {
+            ATTRIBUTES["execution_mode"]: "counterfactual",
+            "orbital.signal.class": "causal",
+            "orbital.causal.permutations": request.permutations,
+            "orbital.causal.bootstrap_samples": request.bootstrap_samples,
+            "orbital.causal.fragility": max(
+                contribution.contribution for contribution in contributions
+            ),
+            "orbital.replay.run_id": request.replay_run_id,
+        },
+    ):
+        for contribution in contributions:
+            with traced(
+                "causal.contribution",
+                {
+                    ATTRIBUTES["execution_mode"]: "counterfactual",
+                    "orbital.signal.class": "causal",
+                    "orbital.causal.factor": contribution.factor,
+                    "orbital.causal.contribution": contribution.contribution,
+                    "orbital.causal.confidence_low": contribution.confidence_low,
+                    "orbital.causal.confidence_high": contribution.confidence_high,
+                },
+            ):
+                pass
     return finding.model_dump(mode="json")
 
 

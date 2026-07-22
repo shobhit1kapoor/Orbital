@@ -6,6 +6,7 @@ import os
 from typing import Any
 
 from fastapi import Header, HTTPException
+from orbital_semconv import ATTRIBUTES, SPANS, traced
 from orbital_shared.api import create_service
 from orbital_shared.database import ObjectStore, RolloutState
 from orbital_shared.models import AttestationEvent, utcnow
@@ -55,6 +56,17 @@ def _rollback(certificate_id: str, reason: str, baseline: str = "baseline-v1") -
         "rolled_back_at": utcnow().isoformat(),
     }
     store.put(event_key, "rollback", payload, utcnow())
+    common = {
+        ATTRIBUTES["certificate_id"]: certificate_id,
+        ATTRIBUTES["artifact_status"]: "drifted",
+        ATTRIBUTES["execution_mode"]: "live",
+        "orbital.signal.class": "rollback",
+        "orbital.rollback.reason": reason,
+    }
+    with traced(SPANS["suspend"], common), traced(
+        SPANS["rollout"], common | {"orbital.rollout.traffic_percentage": 0.0}
+    ):
+        pass
     return payload
 
 

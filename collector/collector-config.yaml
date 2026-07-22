@@ -41,11 +41,38 @@ processors:
         type: string_attribute
         string_attribute:
           key: orbital.signal.class
-          values: [certificate, drift, rollback]
-      - name: routine-sample
-        type: probabilistic
-        probabilistic:
-          sampling_percentage: 5
+          values: [certificate, drift, rollback, causal, frontier]
+      - name: medium-risk-sample
+        type: and
+        and:
+          and_sub_policy:
+            - name: medium-risk
+              type: string_attribute
+              string_attribute:
+                key: orbital.risk.class
+                values: [medium]
+            - name: medium-probability
+              type: probabilistic
+              probabilistic:
+                sampling_percentage: 20
+      - name: successful-low-risk-sample
+        type: and
+        and:
+          and_sub_policy:
+            - name: low-risk
+              type: string_attribute
+              string_attribute:
+                key: orbital.risk.class
+                values: [low]
+            - name: verified-success
+              type: string_attribute
+              string_attribute:
+                key: orbital.mission.outcome
+                values: [verified_success, committed]
+            - name: low-probability
+              type: probabilistic
+              probabilistic:
+                sampling_percentage: 5
   batch:
     timeout: 2s
     send_batch_size: 2048

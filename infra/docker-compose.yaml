@@ -10,7 +10,19 @@ x-service: &python-service
   depends_on:
     postgres: { condition: service_healthy }
     redis: { condition: service_healthy }
-    otel-collector: { condition: service_started }
+    otel-collector: { condition: service_healthy }
+  healthcheck:
+    test:
+      - CMD
+      - python
+      - -c
+      - >-
+        import urllib.request;
+        urllib.request.urlopen('http://localhost:8000/health', timeout=2)
+    interval: 5s
+    timeout: 3s
+    retries: 20
+    start_period: 5s
 
 services:
   postgres:
@@ -45,6 +57,11 @@ services:
       MINIO_ROOT_USER: orbital
       MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-orbital-development-secret}
     ports: ["9000:9000", "9001:9001"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
     volumes: ["minio-data:/data"]
     networks: [orbital]
 
@@ -53,12 +70,25 @@ services:
     command: ["run", "--server", "--log-format=json", "/policies"]
     volumes: ["../policies:/policies:ro"]
     ports: ["8181:8181"]
+    healthcheck:
+      test: ["CMD", "/opa", "eval", "true"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
     networks: [orbital]
 
   ollama:
     image: ollama/ollama:0.11.2
+    environment:
+      OLLAMA_CONTEXT_LENGTH: "8192"
     volumes: ["ollama-data:/root/.ollama"]
     ports: ["11434:11434"]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
     deploy:
       resources:
         reservations:
@@ -71,24 +101,36 @@ services:
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.130.0
     command: ["--config=/etc/otelcol/config.yaml"]
+    environment:
+      # The Collector shares Foundry's network and must never resolve through the host.
+      SIGNOZ_OTLP_ENDPOINT: ingester:4317
     volumes: ["../collector/collector-config.yaml:/etc/otelcol/config.yaml:ro"]
     ports: ["14317:4317", "14318:4318", "13133:13133"]
-    extra_hosts: ["host.docker.internal:host-gateway"]
-    networks: [orbital]
+    networks: [orbital, signoz]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "/otelcol-contrib",
+          "validate",
+          "--config=/etc/otelcol/config.yaml",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
 
   signoz-mcp:
     image: signoz/signoz-mcp-server:latest
     environment:
       TRANSPORT_MODE: http
       MCP_SERVER_PORT: 8000
-      SIGNOZ_URL: http://host.docker.internal:8080
-      SIGNOZ_API_KEY: ${SIGNOZ_API_KEY}
+      SIGNOZ_URL: http://orbital-signoz-0:8080
+      SIGNOZ_API_KEY: ${SIGNOZ_API_KEY:-}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       LOG_LEVEL: info
     ports: ["18000:8000"]
-    extra_hosts: ["host.docker.internal:host-gateway"]
     depends_on: [otel-collector]
-    networks: [orbital]
+    networks: [orbital, signoz]
 
   control-plane:
     <<: *python-service
@@ -163,6 +205,21 @@ services:
     <<: *python-service
     build: { context: .., dockerfile: infra/Dockerfile.service, args: { SERVICE: watchtower } }
     ports: ["8010:8000"]
+    networks: [orbital, signoz]
+
+  watchtower-relay:
+    <<: *python-service
+    build: { context: .., dockerfile: infra/Dockerfile.service, args: { SERVICE: watchtower } }
+    command: ["sh", "-c", "cd /workspace/services/watchtower && uvicorn relay:app --host 0.0.0.0 --port 8000"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://orbital:orbital@postgres:5432/orbital
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      WATCHTOWER_URL: http://watchtower:8000
+      ORBITAL_WEBHOOK_SECRET: ${ORBITAL_WEBHOOK_SECRET:-development-only}
+    depends_on:
+      watchtower: { condition: service_healthy }
+      otel-collector: { condition: service_healthy }
+    networks: [orbital, signoz]
 
   mission-control:
     build:
@@ -176,8 +233,51 @@ services:
       CAUSAL_ENGINE_URL: http://causal-engine:8000
       CERTIFIER_URL: http://certifier:8000
     ports: ["3000:3000"]
-    depends_on: [control-plane, evidence-reconciler, watchtower]
+    depends_on:
+      control-plane: { condition: service_healthy }
+      evidence-reconciler: { condition: service_healthy }
+      watchtower: { condition: service_healthy }
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/api/snapshot').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
     networks: [orbital]
+
+  demo-runner:
+    <<: *python-service
+    profiles: ["tools"]
+    build: { context: .., dockerfile: infra/Dockerfile.service, args: { SERVICE: control-plane } }
+    restart: "no"
+    command: ["python", "/workspace/demo/run_hero_demo.py", "--phase", "all"]
+    environment:
+      CONTROL_PLANE_URL: http://control-plane:8000
+      AGENT_RUNTIME_URL: http://agent-runtime:8000
+      ACTION_GATEWAY_URL: http://action-gateway:8000
+      EVIDENCE_RECONCILER_URL: http://evidence-reconciler:8000
+      CAPSULE_BUILDER_URL: http://capsule-builder:8000
+      REPLAY_ORCHESTRATOR_URL: http://replay-orchestrator:8000
+      ADVERSARIAL_FOUNDRY_URL: http://adversarial-foundry:8000
+      CAUSAL_ENGINE_URL: http://causal-engine:8000
+      CERTIFIER_URL: http://certifier:8000
+      WATCHTOWER_URL: http://watchtower:8000
+      WATCHTOWER_RELAY_URL: http://watchtower-relay:8000
+      MOCK_MCP_URL: http://mock-mcp-tool:8000
+      MOCK_REFUND_URL: http://mock-refund-service:8000
+      ORBITAL_DEMO_OUTPUT: /workspace/data/demo-output
+    volumes:
+      - ../data:/workspace/data
+      - ../missions:/workspace/missions
+      - ../secrets:/workspace/secrets
+      - ../.env:/workspace/.env
+    networks: [orbital, signoz]
 
   obi:
     image: otel/ebpf-instrument:v0.10.0
@@ -196,6 +296,9 @@ services:
 
 networks:
   orbital: { name: orbital-sigma }
+  signoz:
+    external: true
+    name: orbital-network
 
 volumes:
   postgres-data:

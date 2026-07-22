@@ -1,7 +1,7 @@
 apiVersion: v1alpha1
 kind: Installation
 metadata:
-  name: orbital-signoz
+  name: orbital
 spec:
   deployment:
     flavor: compose

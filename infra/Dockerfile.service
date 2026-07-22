@@ -1,8 +1,6 @@
 FROM python:3.11-slim
 
-ARG SERVICE
-ENV SERVICE=${SERVICE} \
-    PYTHONUNBUFFERED=1 \
+ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONPATH=/workspace/packages/shared-models/python:/workspace/packages/mission-contract-sdk/python:/workspace/packages/capability-tokens/python:/workspace/packages/orbital-semconv/python
 
@@ -13,5 +11,12 @@ COPY packages /workspace/packages
 COPY services /workspace/services
 COPY contracts /workspace/contracts
 COPY policies /workspace/policies
+COPY dashboards /workspace/dashboards
+COPY alerts /workspace/alerts
+COPY demo /workspace/demo
+COPY tests /workspace/tests
+
+ARG SERVICE
+ENV SERVICE=${SERVICE}
 
 CMD ["sh", "-c", "cd /workspace/services/${SERVICE} && uvicorn main:app --host 0.0.0.0 --port 8000"]

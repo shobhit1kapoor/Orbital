@@ -46,6 +46,14 @@ def traced(name: str, attributes: dict[str, Any] | None = None) -> Iterator[trac
         yield span
 
 
+def current_trace_ids() -> tuple[str, str]:
+    """Return canonical W3C trace/span identifiers for the active span."""
+    context = trace.get_current_span().get_span_context()
+    if not context.is_valid:
+        return "", ""
+    return f"{context.trace_id:032x}", f"{context.span_id:016x}"
+
+
 def emit_event(event: str, **fields: Any) -> None:
     safe = {key: value for key, value in fields.items() if "token" not in key.lower()}
     logger.info(json.dumps({"event": event, **safe}, sort_keys=True, default=str))

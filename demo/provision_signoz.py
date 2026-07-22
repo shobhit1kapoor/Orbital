@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import argparse
+
+# Raw ClickHouse queries remain single strings so generated SigNoz assets are reproducible.
+# ruff: noqa: E501
 import asyncio
 import json
 import os
@@ -9,28 +13,258 @@ import yaml
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
+NOTIFICATION_CHANNEL = "orbital-watchtower-local"
 
-async def main() -> None:
+DASHBOARD_SQL = {
+    "frontier": "SELECT toStartOfMinute(timestamp) AS timestamp, attributes_string['orbital.authority.level'] AS authority_level, avg(attributes_number['orbital.authority.verified_completion']) AS value FROM signoz_traces.distributed_signoz_index_v3 WHERE timestamp > now() - INTERVAL 24 HOUR AND name = 'authority.evaluate' GROUP BY timestamp, authority_level ORDER BY timestamp",
+    "efficiency": "SELECT toStartOfMinute(timestamp) AS timestamp, attributes_string['orbital.authority.level'] AS authority_level, avg(attributes_number['orbital.authority.efficiency']) AS value FROM signoz_traces.distributed_signoz_index_v3 WHERE timestamp > now() - INTERVAL 24 HOUR AND name = 'authority.evaluate' GROUP BY timestamp, authority_level ORDER BY timestamp",
+    "escapes": "SELECT countIf(attributes_bool['orbital.unsafe_effect'] = true) AS value FROM signoz_traces.distributed_signoz_index_v3 WHERE timestamp > now() - INTERVAL 24 HOUR",
+    "contributions": "SELECT attributes_string['orbital.causal.factor'] AS factor, avg(attributes_number['orbital.causal.contribution']) AS value FROM signoz_traces.distributed_signoz_index_v3 WHERE timestamp > now() - INTERVAL 24 HOUR AND name = 'causal.contribution' GROUP BY factor ORDER BY value DESC",
+    "fragility": "SELECT max(attributes_number['orbital.causal.fragility']) AS value FROM signoz_traces.distributed_signoz_index_v3 WHERE timestamp > now() - INTERVAL 24 HOUR AND name = 'causal.analyze'",
+    "branches": "SELECT timestamp, trace_id, attributes_string['orbital.causal.factor'] AS factor, attributes_number['orbital.causal.contribution'] AS contribution FROM signoz_traces.distributed_signoz_index_v3 WHERE timestamp > now() - INTERVAL 24 HOUR AND name = 'causal.contribution' ORDER BY timestamp DESC LIMIT 100",
+    "traffic": "SELECT toStartOfMinute(timestamp) AS timestamp, avg(attributes_number['orbital.rollout.traffic_percentage']) AS value FROM signoz_traces.distributed_signoz_index_v3 WHERE timestamp > now() - INTERVAL 24 HOUR AND name = 'rollout.change' GROUP BY timestamp ORDER BY timestamp",
+    "drift": "SELECT toStartOfMinute(timestamp) AS timestamp, count() AS value FROM signoz_traces.distributed_signoz_index_v3 WHERE timestamp > now() - INTERVAL 24 HOUR AND attributes_string['orbital.artifact.status'] = 'drifted' GROUP BY timestamp ORDER BY timestamp",
+    "rollback": "SELECT timestamp, trace_id, name, attributes_string['orbital.certificate.id'] AS certificate_id, attributes_string['orbital.rollback.reason'] AS reason FROM signoz_traces.distributed_signoz_index_v3 WHERE timestamp > now() - INTERVAL 24 HOUR AND name IN ('certificate.suspend', 'rollout.change') ORDER BY timestamp DESC LIMIT 100",
+    "states": "SELECT attributes_string['orbital.evidence.state'] AS evidence_state, count() AS value FROM signoz_traces.distributed_signoz_index_v3 WHERE timestamp > now() - INTERVAL 24 HOUR AND name = 'evidence.reconcile' GROUP BY evidence_state",
+    "missing-auth": "SELECT count() AS value FROM signoz_traces.distributed_signoz_index_v3 WHERE timestamp > now() - INTERVAL 24 HOUR AND name = 'action.commit' AND trace_id NOT IN (SELECT trace_id FROM signoz_traces.distributed_signoz_index_v3 WHERE timestamp > now() - INTERVAL 24 HOUR AND name = 'policy.authorize' AND attributes_string['policy.decision'] = 'allow')",
+    "mismatches": "SELECT timestamp, trace_id, attributes_string['orbital.action.type'] AS semantic_action, attributes_string['orbital.observed.action'] AS observed_action FROM signoz_traces.distributed_signoz_index_v3 WHERE timestamp > now() - INTERVAL 24 HOUR AND attributes_string['orbital.evidence.state'] = 'CONTRADICTED' ORDER BY timestamp DESC LIMIT 100",
+    "verdicts": "SELECT attributes_string['orbital.certificate.verdict'] AS verdict, count() AS value FROM signoz_traces.distributed_signoz_index_v3 WHERE timestamp > now() - INTERVAL 24 HOUR AND name = 'certificate.issue' GROUP BY verdict",
+    "task-success": "SELECT countIf(status_code = 0) AS value FROM signoz_traces.distributed_signoz_index_v3 WHERE timestamp > now() - INTERVAL 24 HOUR AND name = 'agent.mission'",
+    "latency": "SELECT toStartOfMinute(timestamp) AS timestamp, quantile(0.95)(duration_nano / 1000000) AS value FROM signoz_traces.distributed_signoz_index_v3 WHERE timestamp > now() - INTERVAL 24 HOUR AND name = 'agent.mission' GROUP BY timestamp ORDER BY timestamp",
+    "cost": "SELECT toStartOfMinute(timestamp) AS timestamp, avg(attributes_number['orbital.cost.usd']) AS value FROM signoz_traces.distributed_signoz_index_v3 WHERE timestamp > now() - INTERVAL 24 HOUR AND name = 'agent.mission' GROUP BY timestamp ORDER BY timestamp",
+}
+
+
+def dashboard_payload(definition: dict) -> dict:
+    payload = dict(definition)
+    variables = payload.get("variables", {})
+    for variable in variables.values():
+        if variable.get("type") == "text":
+            variable["type"] = "TEXTBOX"
+    widgets = []
+    for widget in payload["widgets"]:
+        normalized = {key: value for key, value in widget.items() if key != "query"}
+        normalized.update(
+            {
+                "query": {
+                    "queryType": "clickhouse_sql",
+                    "promql": [],
+                    "clickhouse_sql": [
+                        {
+                            "query": DASHBOARD_SQL[widget["id"]],
+                            "name": "A",
+                            "disabled": False,
+                        }
+                    ],
+                    "builder": {"queryData": [], "queryFormulas": []},
+                },
+                "selectedLogFields": [],
+                "selectedTracesFields": [],
+                "thresholds": [],
+                "contextLinks": {"linksData": []},
+            }
+        )
+        widgets.append(normalized)
+    payload["widgets"] = widgets
+    return payload
+
+
+def alert_payload(alert: dict) -> dict:
+    severity = alert.get("severity", "warning")
+    original_filter = alert.get("filter", "")
+    if "trace_matching" in alert:
+        original_filter = "name = 'action.commit'"
+    if alert.get("signal") == "metrics":
+        original_filter = f"name = '{alert.get('metric', 'orbital.signal')}'"
+    return {
+        "alert": alert["name"],
+        "alertType": "TRACES_BASED_ALERT",
+        "ruleType": "threshold_rule",
+        "description": f"ORBITAL defensive local alert ({alert.get('signal', 'traces')}).",
+        "annotations": {
+            "summary": alert["name"],
+            "description": "Observed {{$value}} matching local ORBITAL signals.",
+        },
+        "labels": {"system": "orbital-sigma", "severity": severity},
+        "frequency": "1m",
+        "evalWindow": "5m",
+        "condition": {
+            "compositeQuery": {
+                "queryType": "builder",
+                "panelType": "graph",
+                "queries": [
+                    {
+                        "type": "builder_query",
+                        "spec": {
+                            "name": "A",
+                            "signal": "traces",
+                            "disabled": False,
+                            "aggregations": [{"expression": "count()"}],
+                            "filter": {"expression": original_filter},
+                            "groupBy": [],
+                            "order": [{"key": {"name": "count()"}, "direction": "desc"}],
+                            "limit": 100,
+                        },
+                    }
+                ],
+            },
+            "selectedQueryName": "A",
+            "thresholds": {
+                "kind": "basic",
+                "spec": [
+                    {
+                        "name": "critical" if severity == "critical" else "warning",
+                        "target": 0,
+                        "op": "above",
+                        "matchType": "at_least_once",
+                        "channels": [NOTIFICATION_CHANNEL],
+                    }
+                ],
+            },
+        },
+    }
+
+
+def result_error(result: object) -> str | None:
+    content = str(getattr(result, "content", result))
+    lowered = content.lower()
+    if getattr(result, "isError", False) or "validation error" in lowered or "error:" in lowered:
+        return content
+    return None
+
+
+async def main(inspect_tools: bool = False) -> None:
     url = os.getenv("SIGNOZ_MCP_URL", "http://localhost:18000/mcp")
     output = {"dashboards": [], "alerts": [], "errors": []}
     async with streamable_http_client(url) as (read, write, _):
         async with ClientSession(read, write) as session:
             await session.initialize()
-            available = {tool.name for tool in (await session.list_tools()).tools}
+            tools = (await session.list_tools()).tools
+            available = {tool.name for tool in tools}
+            if inspect_tools:
+                selected = {}
+                for tool in tools:
+                    if tool.name not in {
+                        "signoz_create_dashboard",
+                        "signoz_create_alert",
+                        "signoz_create_notification_channel",
+                        "signoz_list_alerts",
+                        "signoz_list_alert_rules",
+                        "signoz_list_dashboards",
+                    }:
+                        continue
+                    schema = tool.inputSchema
+                    details: dict[str, object] = {"required": schema.get("required", [])}
+                    if tool.name in {
+                        "signoz_create_notification_channel",
+                        "signoz_list_alerts",
+                        "signoz_list_alert_rules",
+                        "signoz_list_dashboards",
+                    }:
+                        details["properties"] = schema.get("properties", {})
+                    elif tool.name == "signoz_create_alert":
+                        condition = schema["properties"]["condition"]
+                        composite = condition["properties"]["compositeQuery"]
+                        details.update(
+                            {
+                                "condition_required": condition.get("required", []),
+                                "composite_required": composite.get("required", []),
+                                "top_properties": sorted(schema.get("properties", {})),
+                            }
+                        )
+                    else:
+                        widget = schema["properties"]["widgets"]["items"]
+                        query = widget["properties"]["query"]
+                        details.update(
+                            {
+                                "widget_required": widget.get("required", []),
+                                "query_required": query.get("required", []),
+                                "context_links": widget["properties"]["contextLinks"],
+                                "top_properties": sorted(schema.get("properties", {})),
+                            }
+                        )
+                    selected[tool.name] = details
+                selected["matching_tool_names"] = [
+                    tool.name
+                    for tool in tools
+                    if "alert" in tool.name or "dashboard" in tool.name
+                ]
+                print(json.dumps(selected, indent=2))
+                return
             if "signoz_create_dashboard" not in available:
                 raise RuntimeError("SigNoz MCP dashboard tools are unavailable")
+            if {
+                "signoz_list_notification_channels",
+                "signoz_create_notification_channel",
+            } <= available:
+                channels = await session.call_tool("signoz_list_notification_channels", {})
+                if NOTIFICATION_CHANNEL not in str(channels.content):
+                    channel = await session.call_tool(
+                        "signoz_create_notification_channel",
+                        {
+                            "type": "webhook",
+                            "name": NOTIFICATION_CHANNEL,
+                            "webhook_url": "http://watchtower-relay:8000/v1/relay/signoz",
+                            "webhook_username": "orbital-signoz",
+                            "webhook_password": os.getenv(
+                                "ORBITAL_WEBHOOK_SECRET", "development-only"
+                            ),
+                            "send_resolved": True,
+                        },
+                    )
+                    error = result_error(channel)
+                    if error:
+                        output["errors"].append({"name": NOTIFICATION_CHANNEL, "error": error})
+            dashboard_listing = ""
+            if "signoz_list_dashboards" in available:
+                dashboard_listing = str(
+                    (await session.call_tool("signoz_list_dashboards", {})).content
+                )
             for path in sorted(Path("dashboards").glob("*.json")):
                 definition = json.loads(path.read_text(encoding="utf-8"))
+                if definition["title"] in dashboard_listing:
+                    output["dashboards"].append(
+                        {"path": str(path), "result": "already provisioned"}
+                    )
+                    continue
                 try:
-                    result = await session.call_tool("signoz_create_dashboard", definition)
-                    output["dashboards"].append({"path": str(path), "result": str(result.content)})
+                    result = await session.call_tool(
+                        "signoz_create_dashboard", dashboard_payload(definition)
+                    )
+                    error = result_error(result)
+                    if error:
+                        output["errors"].append({"path": str(path), "error": error})
+                    else:
+                        output["dashboards"].append(
+                            {"path": str(path), "result": str(result.content)}
+                        )
                 except Exception as exc:
                     output["errors"].append({"path": str(path), "error": str(exc)})
             alert_manifest = yaml.safe_load(Path("alerts/alerts.yaml").read_text(encoding="utf-8"))
+            alert_listing = ""
+            if "signoz_list_alert_rules" in available:
+                alert_listing = str(
+                    (
+                        await session.call_tool(
+                            "signoz_list_alert_rules", {"limit": 1000, "offset": 0}
+                        )
+                    ).content
+                )
             for alert in alert_manifest["alerts"]:
+                if alert["name"] in alert_listing:
+                    output["alerts"].append(
+                        {"name": alert["name"], "result": "already provisioned"}
+                    )
+                    continue
                 try:
-                    result = await session.call_tool("signoz_create_alert", alert)
-                    output["alerts"].append({"name": alert["name"], "result": str(result.content)})
+                    result = await session.call_tool("signoz_create_alert", alert_payload(alert))
+                    error = result_error(result)
+                    if error:
+                        output["errors"].append({"name": alert["name"], "error": error})
+                    else:
+                        output["alerts"].append(
+                            {"name": alert["name"], "result": str(result.content)}
+                        )
                 except Exception as exc:
                     output["errors"].append({"name": alert["name"], "error": str(exc)})
     Path("data/demo-output").mkdir(parents=True, exist_ok=True)
@@ -51,4 +285,7 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--inspect-tools", action="store_true")
+    arguments = parser.parse_args()
+    asyncio.run(main(arguments.inspect_tools))

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from orbital_semconv import ATTRIBUTES, traced
 from orbital_shared.api import create_service
 from orbital_shared.assurance import classify_evidence
 from orbital_shared.database import ObjectStore
@@ -52,6 +53,23 @@ def reconcile_evidence(value: EvidenceInput) -> EvidenceClaim:
 @app.post("/v1/evidence/reconcile")
 def reconcile(value: EvidenceInput) -> dict[str, Any]:
     claim = reconcile_evidence(value)
+    evidence_state = claim.state.value if isinstance(claim.state, EvidenceState) else claim.state
+    with traced(
+        "evidence.reconcile",
+        {
+            ATTRIBUTES["mission_id"]: value.correlation.mission_id,
+            ATTRIBUTES["candidate_id"]: value.correlation.candidate_id,
+            ATTRIBUTES["action_id"]: value.correlation.action_id,
+            ATTRIBUTES["action_type"]: value.semantic_action or "unknown",
+            ATTRIBUTES["evidence_state"]: evidence_state,
+            "orbital.observed.action": value.observed_action or "unobserved",
+            "orbital.source.trace_id": value.correlation.trace_id,
+            "orbital.receipt.verified": bool(value.receipt_verified),
+            "orbital.obi.observed": bool(value.obi_observed),
+            "orbital.unsafe_effect": evidence_state == EvidenceState.CONTRADICTED.value,
+        },
+    ):
+        pass
     store.put(claim.claim_id, "evidence_claim", claim.model_dump(mode="json"), claim.created_at)
     return claim.model_dump(mode="json")
 

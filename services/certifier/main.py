@@ -8,6 +8,7 @@ from typing import Any
 
 from nacl.exceptions import BadSignatureError
 from nacl.signing import SigningKey
+from orbital_semconv import ATTRIBUTES, SPANS, traced
 from orbital_shared.api import create_service
 from orbital_shared.database import ObjectStore
 from orbital_shared.models import (
@@ -25,6 +26,10 @@ from pydantic import BaseModel
 
 app = create_service("ORBITAL Σ CLEARANCE Certifier", "orbital-certifier")
 store = ObjectStore()
+
+
+def _enum_value(value: Any) -> str:
+    return value.value if hasattr(value, "value") else str(value)
 
 
 def _signing_key() -> SigningKey:
@@ -162,6 +167,20 @@ def authority(request: CertificationRequest) -> dict[str, Any]:
         store.put(
             point.digest, "authority_frontier", point.model_dump(mode="json"), point.created_at
         )
+        with traced(
+            "authority.evaluate",
+            {
+                ATTRIBUTES["candidate_id"]: request.candidate_id,
+                ATTRIBUTES["authority_level"]: _enum_value(level),
+                ATTRIBUTES["execution_mode"]: "deterministic_simulation",
+                "orbital.signal.class": "frontier",
+                "orbital.authority.verified_completion": point.verified_completion,
+                "orbital.authority.efficiency": point.authority_efficiency,
+                "orbital.unsafe_attempts": point.unsafe_attempts,
+                "orbital.unsafe_effect": point.escaped_unsafe_effects > 0,
+            },
+        ):
+            pass
         points.append(point.model_dump(mode="json"))
     return {"points": points, "maximum_safe_refund_usd": request.maximum_safe_refund_usd}
 
@@ -212,6 +231,24 @@ def issue_certificate(request: CertificationRequest) -> dict[str, Any]:
         certificate.model_dump(mode="json"),
         certificate.created_at,
     )
+    with traced(
+        SPANS["certificate"],
+        {
+            ATTRIBUTES["candidate_id"]: request.candidate_id,
+            ATTRIBUTES["certificate_id"]: certificate.certificate_id,
+            ATTRIBUTES["artifact_digest"]: certificate.artifact.digest,
+            ATTRIBUTES["authority_level"]: _enum_value(certificate.granted_authority),
+            ATTRIBUTES["verdict"]: _enum_value(certificate.verdict),
+            ATTRIBUTES["execution_mode"]: "deterministic_simulation",
+            "orbital.signal.class": "certificate",
+            "orbital.evidence.parity": certificate.evidence_parity,
+            "orbital.mission.coverage": certificate.mission_coverage,
+            "orbital.replay.fidelity": certificate.replay_fidelity,
+            "orbital.test.runs": request.total_runs,
+            "orbital.unsafe_effect": request.escaped_unsafe_effects > 0,
+        },
+    ):
+        pass
     return {
         "certificate": certificate.model_dump(mode="json"),
         "public_key": base64.b64encode(bytes(signing_key.verify_key)).decode(),

@@ -2,23 +2,24 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import Any
 
 import httpx
 
 BASE = {
-    "control": "http://localhost:8001",
-    "agent": "http://localhost:8002",
-    "evidence": "http://localhost:8004",
-    "capsule": "http://localhost:8005",
-    "replay": "http://localhost:8006",
-    "range": "http://localhost:8007",
-    "causal": "http://localhost:8008",
-    "certifier": "http://localhost:8009",
-    "watchtower": "http://localhost:8010",
+    "control": os.getenv("CONTROL_PLANE_URL", "http://localhost:8001"),
+    "agent": os.getenv("AGENT_RUNTIME_URL", "http://localhost:8002"),
+    "evidence": os.getenv("EVIDENCE_RECONCILER_URL", "http://localhost:8004"),
+    "capsule": os.getenv("CAPSULE_BUILDER_URL", "http://localhost:8005"),
+    "replay": os.getenv("REPLAY_ORCHESTRATOR_URL", "http://localhost:8006"),
+    "range": os.getenv("ADVERSARIAL_FOUNDRY_URL", "http://localhost:8007"),
+    "causal": os.getenv("CAUSAL_ENGINE_URL", "http://localhost:8008"),
+    "certifier": os.getenv("CERTIFIER_URL", "http://localhost:8009"),
+    "watchtower": os.getenv("WATCHTOWER_URL", "http://localhost:8010"),
 }
-OUTPUT = Path("data/demo-output")
+OUTPUT = Path(os.getenv("ORBITAL_DEMO_OUTPUT", "data/demo-output"))
 
 
 def post(service: str, path: str, payload: dict[str, Any]) -> dict[str, Any]:
