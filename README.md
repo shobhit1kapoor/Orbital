@@ -34,6 +34,9 @@ make certify
 make inject-drift
 make provision-signoz
 make verify
+make verify-obi
+make verify-alerts
+make verify-campaign
 make reset-demo
 ```
 
@@ -49,23 +52,24 @@ The current local workflow executes real HTTP services and exports real OpenTele
 - PARALLAX evidence reconciliation states;
 - generation of 120 deterministic capsules and 880 mutation records, with an adaptive 64-attack set;
 - deterministic replay, metamorphic result records, causal contributions, and a minimized regression;
+- persistent PostgreSQL campaign metadata, versioned MinIO artifacts, Celery group/chord replay execution, recovery, and reconnectable SSE progress;
 - six-point authority-frontier evaluation;
 - Ed25519-signed CLEARANCE certificates;
 - WATCHTOWER drift suspension and idempotent rollback;
-- five provisioned SigNoz dashboards and twelve alert rules;
+- native Ubuntu OBI/eBPF evidence validation restricted to the project containers;
+- six provisioned SigNoz dashboards and twelve alert rules;
 - all seven Mission Control views backed by live APIs or explicitly labeled deterministic/replay/counterfactual results.
 
 ## Scope still under implementation
 
 The full plan is intentionally not reduced. The following items remain advanced implementation work rather than claims of this checkpoint:
 
-- production persistence through SQLAlchemy/Alembic, Celery groups/chords, Redis result storage, and encrypted MinIO capsule bundles across every service;
+- broader SQLAlchemy/Alembic adoption and encrypted MinIO bundles across every service beyond the persistent campaign slice;
 - complete OPA decision-log and signed tool-receipt parity reconstructed exclusively from queried SigNoz records;
 - Qwen-guided adaptive search for all 880 mutations, 128-permutation sampled Shapley analysis, bootstrap confidence intervals, and full delta debugging;
 - PostgreSQL-backed OpenFeature rollout state and complete safety-case evidence graph persistence;
-- real OBI/eBPF validation on the final native Ubuntu VM, restricted to the project containers;
 - the full 1,000-mission statistical recertification run and threshold-near sequential trials;
-- complete Playwright coverage, trace-matching asset provisioning, and final alert-history demonstration.
+- complete Playwright coverage and trace-matching asset provisioning.
 
 These limitations are documented rather than silently deleting or weakening the original requirements.
 
