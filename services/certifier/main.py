@@ -625,6 +625,28 @@ def certificate(certificate_id: str) -> dict[str, Any]:
         return record.certificate_payload
 
 
+@app.get("/v1/certificate-verifications")
+def certificate_verifications() -> list[dict[str, Any]]:
+    with Session(store.engine) as session:
+        rows = session.scalars(
+            select(CertificateVerificationRecord)
+            .order_by(CertificateVerificationRecord.created_at.desc())
+            .limit(100)
+        ).all()
+        return [
+            {
+                "verification_id": row.verification_id,
+                "certificate_id": row.certificate_id,
+                "valid": row.valid,
+                "reason": row.reason,
+                "observed_artifact_digest": row.observed_artifact_digest,
+                "trace_id": row.trace_id,
+                "created_at": row.created_at.isoformat(),
+            }
+            for row in rows
+        ]
+
+
 @app.post("/v1/certificates/{certificate_id}/verify")
 def verify_certificate(certificate_id: str, request: VerifyRequest) -> dict[str, Any]:
     request_digest = sha256_digest(

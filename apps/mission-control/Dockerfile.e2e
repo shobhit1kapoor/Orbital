@@ -1,0 +1,13 @@
+FROM mcr.microsoft.com/playwright:v1.61.1-noble
+
+RUN corepack enable
+WORKDIR /workspace
+
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
+COPY apps/mission-control/package.json apps/mission-control/package.json
+RUN pnpm install --filter mission-control... --frozen-lockfile
+
+COPY apps/mission-control apps/mission-control
+
+ENV PLAYWRIGHT_BASE_URL=http://mission-control:3000
+CMD ["pnpm", "--filter", "mission-control", "test:e2e"]

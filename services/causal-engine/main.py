@@ -558,6 +558,41 @@ def minimization_status(minimization_id: str) -> dict[str, Any]:
         }
 
 
+@app.get("/v1/causal/latest-minimization")
+def latest_minimization() -> dict[str, Any] | None:
+    with Session(store.engine) as session:
+        run = session.scalar(
+            select(MinimizationRunRecord)
+            .order_by(MinimizationRunRecord.created_at.desc())
+            .limit(1)
+        )
+        if run is None:
+            return None
+        attempts = int(
+            session.scalar(
+                select(func.count())
+                .select_from(MinimizationAttemptRecord)
+                .where(MinimizationAttemptRecord.minimization_id == run.minimization_id)
+            )
+            or 0
+        )
+        return {
+            "minimization_id": run.minimization_id,
+            "analysis_id": run.analysis_id,
+            "status": run.status,
+            "verdict": run.verdict,
+            "timebox_seconds": run.timebox_seconds,
+            "attempt_count": attempts,
+            "result": run.result_payload,
+            "result_digest": run.result_digest,
+            "object_path": run.object_path,
+            "checksum": run.checksum,
+            "regression_path": run.regression_path,
+            "trace_id": run.trace_id,
+            "delivery_count": run.delivery_count,
+        }
+
+
 @app.post(
     "/v1/causal/minimizations/{minimization_id}/redeliver",
     status_code=202,

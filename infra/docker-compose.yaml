@@ -367,6 +367,7 @@ services:
       WATCHTOWER_URL: http://watchtower:8000
       CAUSAL_ENGINE_URL: http://causal-engine:8000
       CERTIFIER_URL: http://certifier:8000
+      SIGNOZ_PUBLIC_URL: http://localhost:8080
     ports: ["3000:3000"]
     depends_on:
       control-plane: { condition: service_healthy }
@@ -384,6 +385,17 @@ services:
       timeout: 3s
       retries: 20
       start_period: 5s
+    networks: [orbital]
+
+  mission-control-e2e:
+    profiles: ["tools"]
+    build:
+      context: ..
+      dockerfile: apps/mission-control/Dockerfile.e2e
+    environment:
+      PLAYWRIGHT_BASE_URL: http://mission-control:3000
+    depends_on:
+      mission-control: { condition: service_healthy }
     networks: [orbital]
 
   demo-runner:

@@ -212,7 +212,7 @@ def summary() -> dict[str, Any]:
             campaigns.campaign_payload(session, campaign) for campaign in campaign_rows
         ]
         session.commit()
-    certificates = store.list("certificate", 5)
+    certificates = store.list("certificate", 20)
     rollout_value = store.get("active-rollout")
     return {
         "campaigns": campaign_payloads,

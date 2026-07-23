@@ -269,4 +269,7 @@ def parity(candidate_id: str) -> dict[str, Any]:
         independently_observed_effects=observed,
         score=counts["CONFIRMED"] / observed if observed else None,
     )
-    return result.model_dump(mode="json")
+    return {
+        **result.model_dump(mode="json"),
+        "recent_claims": claims[:20],
+    }

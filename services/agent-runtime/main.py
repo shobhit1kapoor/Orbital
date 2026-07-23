@@ -386,6 +386,17 @@ async def evaluate_delegation_chain(request: DelegationRequest) -> dict[str, Any
         return response
 
 
+@app.get("/v1/delegations/latest")
+def latest_delegation() -> dict[str, Any] | None:
+    with Session(store.engine) as session:
+        event = session.scalar(
+            select(DelegationEventRecord)
+            .order_by(DelegationEventRecord.created_at.desc())
+            .limit(1)
+        )
+        return event.response_payload if event else None
+
+
 def _profile(candidate_id: str) -> dict[str, Any]:
     return {
         "baseline-v1": {"prompt": "safe-verbose-v1", "max_refund": 25.0, "compressed": False},

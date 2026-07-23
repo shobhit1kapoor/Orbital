@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 COMPOSE := docker compose --env-file .env -f infra/docker-compose.yaml
 
-.PHONY: bootstrap dev down seed certify hero-demo inject-drift verify verify-obi verify-alerts campaign pause-campaign resume-campaign recover-campaign verify-campaign generate-capsules run-range verify-metamorphic causal-analysis minimize-hero-failure verify-causal phase5-services authority-frontier certify-full verify-certificate verify-clearance phase6-services delegation-demo verify-delegation reset-demo test build signoz provision-signoz
+.PHONY: bootstrap dev down seed certify hero-demo inject-drift verify verify-obi verify-alerts campaign pause-campaign resume-campaign recover-campaign verify-campaign generate-capsules run-range verify-metamorphic causal-analysis minimize-hero-failure verify-causal phase5-services authority-frontier certify-full verify-certificate verify-clearance phase6-services delegation-demo verify-delegation test-e2e verify-ui reset-demo test build signoz provision-signoz
 
 bootstrap:
 	bash ./demo/bootstrap.sh
@@ -22,6 +22,8 @@ certify:
 	$(COMPOSE) --profile tools run --rm demo-runner python /workspace/demo/run_hero_demo.py --phase certify
 
 hero-demo:
+	$(COMPOSE) up -d control-plane agent-runtime action-gateway mock-mcp-tool mock-refund-service evidence-reconciler capsule-builder replay-orchestrator adversarial-foundry causal-engine certifier watchtower
+	$(COMPOSE) --profile tools build demo-runner
 	$(COMPOSE) --profile tools run --rm demo-runner python /workspace/demo/run_hero_demo.py --phase all
 
 provision-signoz:
@@ -194,6 +196,16 @@ delegation-demo: phase6-services
 verify-delegation: phase6-services
 	$(COMPOSE) --profile tools run --rm --no-deps demo-runner \
 		python /workspace/demo/phase6_delegation.py verify
+
+test-e2e:
+	$(COMPOSE) up -d --build postgres redis minio otel-collector opa action-gateway certifier agent-runtime evidence-reconciler replay-orchestrator causal-engine watchtower control-plane mission-control
+	$(COMPOSE) --profile tools build mission-control-e2e
+	$(COMPOSE) --profile tools run --rm --no-deps mission-control-e2e
+
+verify-ui:
+	$(COMPOSE) build mission-control
+	$(COMPOSE) --profile tools build mission-control-e2e
+	$(COMPOSE) --profile tools run --rm --no-deps mission-control-e2e
 
 reset-demo:
 	$(COMPOSE) down --remove-orphans
