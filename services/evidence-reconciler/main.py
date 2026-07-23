@@ -72,17 +72,18 @@ FORMAT JSON
 
 SENSOR_HEALTH_SQL = """
 SELECT
-    countIf(resources_string['otel.scope.name'] = {obi_scope:String}) AS obi_spans,
+    countIf(
+        resources_string['otel.scope.name'] = {obi_scope:String}
+        AND timestamp > now() - INTERVAL 15 SECOND
+    ) AS obi_spans,
     countIf(toString(scope) LIKE '%orbital-sigma%') AS semantic_spans,
     countIf(attributes_string['orbital.receipt.signature_algorithm'] = 'Ed25519')
         AS signed_receipts
 FROM signoz_traces.distributed_signoz_index_v3
--- Health is a liveness assertion, not a statement that OBI emitted at some
--- point in the recent past. Project health checks generate local traffic at
--- least every few seconds, so an absence of OBI spans for 15 seconds means
--- the independent evidence plane is unavailable and certification must be
--- UNKNOWN.
-WHERE timestamp > now() - INTERVAL 15 SECOND
+-- Semantic and signed-receipt checks assert that their pipelines work. OBI is
+-- the live independent sensor, so its count above has the stricter freshness
+-- condition while the other planes retain enough time for collector export.
+WHERE timestamp > now() - INTERVAL 5 MINUTE
 FORMAT JSON
 """
 
