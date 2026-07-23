@@ -74,7 +74,7 @@ SENSOR_HEALTH_SQL = """
 SELECT
     countIf(
         resources_string['otel.scope.name'] = {obi_scope:String}
-        AND timestamp > now() - INTERVAL 15 SECOND
+        AND timestamp > now() - INTERVAL 60 SECOND
     ) AS obi_spans,
     countIf(toString(scope) LIKE '%orbital-sigma%') AS semantic_spans,
     countIf(attributes_string['orbital.receipt.signature_algorithm'] = 'Ed25519')

@@ -50,7 +50,7 @@ verify-obi:
 	# Recreate OBI after application services so eBPF probes attach to their
 	# current PIDs even when Compose replaced a Python service container.
 	$(COMPOSE) --profile obi up -d --force-recreate obi
-	@sleep 8
+	@sleep 20
 	$(COMPOSE) --profile tools build demo-runner
 	$(COMPOSE) --profile tools run --rm --no-deps demo-runner python /workspace/demo/verify_obi.py
 
