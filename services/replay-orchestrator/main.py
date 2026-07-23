@@ -21,8 +21,10 @@ from orbital_shared.campaigns import (
 from orbital_shared.database import (
     CampaignRecord,
     CapsuleRecord,
+    MetamorphicCaseRecord,
     ReplayJobRecord,
 )
+from orbital_shared.metamorphic import INVARIANTS, default_fixture
 from orbital_shared.models import (
     AuthorityLevel,
     ReplayRun,
@@ -34,7 +36,12 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from sse_starlette.sse import EventSourceResponse
-from worker import dispatch_campaign, execute_replay_job
+from worker import (
+    dispatch_campaign,
+    dispatch_metamorphic_suite,
+    execute_metamorphic_case,
+    execute_replay_job,
+)
 
 app = create_service("ORBITAL Σ Replay Orchestrator", "orbital-replay-orchestrator")
 repository = CampaignRepository()
@@ -67,6 +74,11 @@ class CampaignRequest(ReplayRequest):
 class MetamorphicRequest(BaseModel):
     source_run_id: str
     transformations: list[str]
+
+
+class MetamorphicSuiteRequest(BaseModel):
+    capsule_ids: list[str] = Field(default_factory=list)
+    submission_key: str = "phase4b-metamorphic-v1"
 
 
 def _job_pairs(request: CampaignRequest) -> list[tuple[str, str]]:

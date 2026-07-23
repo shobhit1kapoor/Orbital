@@ -22,9 +22,18 @@ from orbital_shared.campaigns import (
     versioned_path,
 )
 from orbital_shared.database import CampaignRecord, CapsuleRecord, ReplayJobRecord
-from orbital_shared.models import sha256_digest, utcnow
+from orbital_shared.database import (
+    AdaptiveBranchRecord,
+    MetamorphicCaseRecord,
+    MutationRecord,
+    RangeCampaignRecord,
+    RangeScoreRecord,
+)
+from orbital_shared.metamorphic import evaluate_invariant
+from orbital_shared.models import ReplayMutation, sha256_digest, utcnow
 from orbital_shared.object_storage import IntegrityError, VersionedObjectStorage
-from sqlalchemy import select
+from orbital_shared.range_evaluation import AdaptiveProposal, evaluate_branch, score_mutation
+from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -53,6 +62,10 @@ replay_duration = meter.create_histogram("orbital.replay.duration", unit="ms")
 queue_delay = meter.create_histogram("orbital.replay.queue.delay", unit="ms")
 postgres_failures = meter.create_counter("orbital.postgresql.write.failures")
 worker_active = meter.create_up_down_counter("orbital.worker.active")
+range_branches = meter.create_counter("orbital.range.adaptive.branches")
+range_duration = meter.create_histogram("orbital.range.adaptive.duration", unit="ms")
+metamorphic_evaluations = meter.create_counter("orbital.metamorphic.evaluations")
+metamorphic_failures = meter.create_counter("orbital.metamorphic.failures")
 
 
 def _trace_context(trace_id: str, job_id: str):
@@ -73,6 +86,18 @@ def dispatch_campaign(campaign_id: str, job_ids: list[str]) -> str:
         "campaign.chord.dispatched",
         campaign_id=campaign_id,
         jobs=len(job_ids),
+        chord_id=result.id,
+    )
+    return str(result.id)
+
+
+def dispatch_metamorphic_suite(suite_id: str, case_ids: list[str]) -> str:
+    header = group(execute_metamorphic_case.s(case_id) for case_id in case_ids)
+    result = chord(header)(complete_metamorphic_suite.s(suite_id))
+    emit_event(
+        "metamorphic.suite.dispatched",
+        suite_id=suite_id,
+        cases=len(case_ids),
         chord_id=result.id,
     )
     return str(result.id)
@@ -458,3 +483,304 @@ def complete_campaign(results: list[dict[str, Any]], campaign_id: str) -> dict[s
             "counts": counts.as_dict(),
             "export_path": export_path,
         }
+
+
+@app.task(
+    bind=True,
+    name="orbital.range.execute_branch",
+    max_retries=3,
+    default_retry_delay=1,
+)
+def execute_range_branch(self, branch_id: str) -> dict[str, Any]:
+    started = time.perf_counter()
+    now = utcnow()
+    with Session(repository.engine) as session:
+        branch = session.scalar(
+            select(AdaptiveBranchRecord)
+            .where(AdaptiveBranchRecord.branch_id == branch_id)
+            .with_for_update()
+        )
+        if not branch:
+            return {"branch_id": branch_id, "status": "MISSING"}
+        if branch.status == "COMPLETED":
+            branch.delivery_count += 1
+            session.commit()
+            return {
+                "branch_id": branch_id,
+                "status": "COMPLETED",
+                "result_digest": branch.result_digest,
+                "idempotent_replay": True,
+            }
+        parent_score: float | None = None
+        if branch.parent_branch_id:
+            parent = session.get(AdaptiveBranchRecord, branch.parent_branch_id)
+            if not parent or parent.status != "COMPLETED":
+                raise self.retry(
+                    exc=RuntimeError("adaptive parent branch is not complete"),
+                    countdown=1,
+                )
+            parent_score = float((parent.result_payload or {})["adaptive_score"])
+        campaign = session.get(RangeCampaignRecord, branch.campaign_id)
+        score_record = session.get(RangeScoreRecord, branch.seed_mutation_id)
+        mutation_record = session.get(MutationRecord, branch.seed_mutation_id)
+        if not campaign or not score_record or not mutation_record:
+            return {"branch_id": branch_id, "status": "MISSING_INPUT"}
+        branch.status = "RUNNING"
+        branch.delivery_count += 1
+        session.commit()
+        trace_id = branch.trace_id
+        campaign_id = branch.campaign_id
+        proposal_payload = branch.proposal
+        catalogue_digest = campaign.catalogue_digest
+        seed_payload = mutation_record.payload
+
+    context = _trace_context(trace_id, branch_id)
+    with trace.get_tracer("orbital-replay-worker").start_as_current_span(
+        "range.adaptive.execute",
+        context=context,
+        attributes={
+            "orbital.range.campaign.id": campaign_id,
+            "orbital.range.branch.id": branch_id,
+            "orbital.range.generation": proposal_payload["generation"],
+            "orbital.range.beam_index": proposal_payload["beam_index"],
+            "orbital.execution.mode": "deterministic_simulation",
+            "orbital.signal.class": "campaign",
+        },
+    ) as span:
+        actual_trace_id, _ = current_trace_ids()
+        proposal = AdaptiveProposal.model_validate(proposal_payload)
+        seed_score = score_mutation(
+            ReplayMutation.model_validate(seed_payload), catalogue_digest
+        )
+        result_payload = evaluate_branch(seed_score, proposal, parent_score)
+        result_payload |= {
+            "branch_id": branch_id,
+            "campaign_id": campaign_id,
+            "trace_id": actual_trace_id,
+        }
+        result_digest = sha256_digest(result_payload)
+        path = versioned_path(
+            "adaptive-branches", branch_id, result_digest, "result.json"
+        )
+        storage_result = objects.put_json(
+            path, "adaptive_branch", campaign_id, result_payload
+        )
+        with Session(repository.engine) as session:
+            branch = session.get(AdaptiveBranchRecord, branch_id)
+            if branch.status != "COMPLETED":
+                branch.status = "COMPLETED"
+                branch.result_payload = result_payload
+                branch.result_digest = result_digest
+                branch.object_path = path
+                branch.checksum = storage_result["checksum"]
+                branch.completed_at = utcnow()
+                campaign = session.get(RangeCampaignRecord, campaign_id)
+                campaign.status = "RUNNING"
+                campaign.budget_used = int(
+                    session.scalar(
+                        select(func.count())
+                        .select_from(AdaptiveBranchRecord)
+                        .where(
+                            AdaptiveBranchRecord.campaign_id == campaign_id,
+                            AdaptiveBranchRecord.status == "COMPLETED",
+                        )
+                    )
+                    or 0
+                )
+                session.commit()
+        range_branches.add(
+            1,
+            {
+                "orbital.range.generation": proposal.generation,
+                "orbital.range.proposal.source": proposal.source,
+            },
+        )
+        range_duration.record((time.perf_counter() - started) * 1000)
+        span.set_attribute("orbital.range.adaptive_score", result_payload["adaptive_score"])
+        emit_event(
+            "range.adaptive.branch.completed",
+            campaign_id=campaign_id,
+            branch_id=branch_id,
+            trace_id=actual_trace_id,
+            result_digest=result_digest,
+        )
+        return {
+            "branch_id": branch_id,
+            "status": "COMPLETED",
+            "result_digest": result_digest,
+            "trace_id": actual_trace_id,
+            "object_path": path,
+        }
+
+
+@app.task(name="orbital.range.complete_campaign")
+def complete_range_campaign(campaign_id: str) -> dict[str, Any]:
+    with traced(
+        "range.adaptive.chord.complete",
+        {
+            "orbital.range.campaign.id": campaign_id,
+            "orbital.signal.class": "campaign",
+        },
+    ):
+        with Session(repository.engine) as session:
+            campaign = session.get(RangeCampaignRecord, campaign_id)
+            if not campaign:
+                return {"campaign_id": campaign_id, "status": "MISSING"}
+            completed = int(
+                session.scalar(
+                    select(func.count())
+                    .select_from(AdaptiveBranchRecord)
+                    .where(
+                        AdaptiveBranchRecord.campaign_id == campaign_id,
+                        AdaptiveBranchRecord.status == "COMPLETED",
+                    )
+                )
+                or 0
+            )
+            violations = int(
+                sum(
+                    bool((row.result_payload or {}).get("invariant_violation_observed"))
+                    for row in session.scalars(
+                        select(AdaptiveBranchRecord).where(
+                            AdaptiveBranchRecord.campaign_id == campaign_id
+                        )
+                    ).all()
+                )
+            )
+            campaign.budget_used = completed
+            campaign.status = (
+                "COMPLETED" if completed == campaign.search_budget else "PARTIAL"
+            )
+            campaign.completed_at = utcnow()
+            summary = {
+                "completed_branches": completed,
+                "expected_branches": campaign.search_budget,
+                "violations_observed": violations,
+                "budget_exhausted": completed == campaign.search_budget,
+                "stop_reason": (
+                    "maximum_generations_reached"
+                    if completed == campaign.search_budget
+                    else "partial_execution"
+                ),
+            }
+            campaign.result_summary = (campaign.result_summary or {}) | summary
+            session.commit()
+        digest = sha256_digest(summary)
+        path = versioned_path(
+            "campaign-exports", campaign_id, digest, "range-campaign.json"
+        )
+        objects.put_json(path, "range_campaign_export", campaign_id, summary)
+        return {
+            "campaign_id": campaign_id,
+            "status": campaign.status,
+            **summary,
+            "object_path": path,
+        }
+
+
+@app.task(
+    bind=True,
+    name="orbital.metamorphic.evaluate_case",
+    max_retries=3,
+    default_retry_delay=1,
+)
+def execute_metamorphic_case(self, case_id: str) -> dict[str, Any]:
+    with Session(repository.engine) as session:
+        case = session.scalar(
+            select(MetamorphicCaseRecord)
+            .where(MetamorphicCaseRecord.case_id == case_id)
+            .with_for_update()
+        )
+        if not case:
+            return {"case_id": case_id, "status": "MISSING"}
+        if case.status == "COMPLETED":
+            case.delivery_count += 1
+            session.commit()
+            return {
+                "case_id": case_id,
+                "status": "COMPLETED",
+                "result_digest": case.result_digest,
+                "idempotent_replay": True,
+            }
+        case.status = "RUNNING"
+        case.delivery_count += 1
+        session.commit()
+        trace_id = case.trace_id
+        suite_id = case.suite_id
+        invariant = case.invariant
+        fixture = case.input_payload["fixture"]
+
+    context = _trace_context(trace_id, case_id)
+    with trace.get_tracer("orbital-replay-worker").start_as_current_span(
+        "metamorphic.invariant.evaluate",
+        context=context,
+        attributes={
+            "orbital.metamorphic.suite.id": suite_id,
+            "orbital.metamorphic.case.id": case_id,
+            "orbital.metamorphic.invariant": invariant,
+            "orbital.execution.mode": "deterministic_simulation",
+            "orbital.signal.class": "campaign",
+        },
+    ):
+        actual_trace_id, _ = current_trace_ids()
+        result = evaluate_invariant(invariant, fixture)
+        payload = result.model_dump(mode="json") | {
+            "case_id": case_id,
+            "suite_id": suite_id,
+            "trace_id": actual_trace_id,
+        }
+        result_digest = sha256_digest(payload)
+        path = versioned_path(
+            "metamorphic-results", case_id, result_digest, "result.json"
+        )
+        storage_result = objects.put_json(
+            path, "metamorphic_result", suite_id, payload
+        )
+        with Session(repository.engine) as session:
+            case = session.get(MetamorphicCaseRecord, case_id)
+            if case.status != "COMPLETED":
+                case.status = "COMPLETED"
+                case.result_payload = payload
+                case.result_digest = result_digest
+                case.object_path = path
+                case.checksum = storage_result["checksum"]
+                case.completed_at = utcnow()
+                session.commit()
+        metamorphic_evaluations.add(1, {"orbital.metamorphic.invariant": invariant})
+        if not result.passed:
+            metamorphic_failures.add(1, {"orbital.metamorphic.invariant": invariant})
+        emit_event(
+            "metamorphic.invariant.completed",
+            suite_id=suite_id,
+            case_id=case_id,
+            invariant=invariant,
+            passed=result.passed,
+            trace_id=actual_trace_id,
+        )
+        return {
+            "case_id": case_id,
+            "status": "COMPLETED",
+            "passed": result.passed,
+            "result_digest": result_digest,
+            "trace_id": actual_trace_id,
+            "object_path": path,
+        }
+
+
+@app.task(name="orbital.metamorphic.complete_suite")
+def complete_metamorphic_suite(
+    results: list[dict[str, Any]], suite_id: str
+) -> dict[str, Any]:
+    passed = sum(bool(item.get("passed")) for item in results)
+    payload = {
+        "suite_id": suite_id,
+        "case_count": len(results),
+        "passed": passed,
+        "failed": len(results) - passed,
+        "complete": all(item.get("status") == "COMPLETED" for item in results),
+    }
+    repository.object_store.put(
+        suite_id, "metamorphic_suite", payload, utcnow()
+    )
+    emit_event("metamorphic.suite.completed", **payload)
+    return payload

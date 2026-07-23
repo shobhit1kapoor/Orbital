@@ -105,6 +105,103 @@ class MutationRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class RangeCampaignRecord(Base):
+    __tablename__ = "range_campaigns"
+
+    campaign_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    submission_digest: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    catalogue_digest: Mapped[str] = mapped_column(String(80), index=True)
+    selection_digest: Mapped[str] = mapped_column(String(80), index=True)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    beam_width: Mapped[int] = mapped_column(Integer)
+    max_generations: Mapped[int] = mapped_column(Integer)
+    search_budget: Mapped[int] = mapped_column(Integer)
+    budget_used: Mapped[int] = mapped_column(Integer, default=0)
+    selected_count: Mapped[int] = mapped_column(Integer)
+    proposal_source: Mapped[str] = mapped_column(String(64))
+    result_summary: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class RangeScoreRecord(Base):
+    __tablename__ = "range_mutation_scores"
+
+    mutation_id: Mapped[str] = mapped_column(
+        ForeignKey("replay_mutations.mutation_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    campaign_id: Mapped[str] = mapped_column(
+        ForeignKey("range_campaigns.campaign_id", ondelete="CASCADE"), index=True
+    )
+    rank: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    selected: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    total_score: Mapped[float] = mapped_column(Float)
+    factors: Mapped[dict[str, Any]] = mapped_column(JSON)
+    provenance: Mapped[dict[str, Any]] = mapped_column(JSON)
+    score_digest: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class AdaptiveBranchRecord(Base):
+    __tablename__ = "range_adaptive_branches"
+    __table_args__ = (
+        UniqueConstraint(
+            "campaign_id",
+            "seed_mutation_id",
+            "generation",
+            "beam_index",
+            name="uq_range_branch",
+        ),
+    )
+
+    branch_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    campaign_id: Mapped[str] = mapped_column(
+        ForeignKey("range_campaigns.campaign_id", ondelete="CASCADE"), index=True
+    )
+    seed_mutation_id: Mapped[str] = mapped_column(String(128), index=True)
+    parent_branch_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    generation: Mapped[int] = mapped_column(Integer)
+    beam_index: Mapped[int] = mapped_column(Integer)
+    trace_id: Mapped[str] = mapped_column(String(32), index=True)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    delivery_count: Mapped[int] = mapped_column(Integer, default=0)
+    proposal: Mapped[dict[str, Any]] = mapped_column(JSON)
+    proposal_digest: Mapped[str] = mapped_column(String(80))
+    result_payload: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    result_digest: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    object_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    checksum: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class MetamorphicCaseRecord(Base):
+    __tablename__ = "metamorphic_cases"
+
+    case_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    suite_id: Mapped[str] = mapped_column(String(128), index=True)
+    invariant: Mapped[str] = mapped_column(String(128), index=True)
+    capsule_id: Mapped[str] = mapped_column(String(128), index=True)
+    trace_id: Mapped[str] = mapped_column(String(32), index=True)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    delivery_count: Mapped[int] = mapped_column(Integer, default=0)
+    retries: Mapped[int] = mapped_column(Integer, default=0)
+    input_payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+    result_payload: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    result_digest: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    object_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    checksum: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
 class StorageObjectRecord(Base):
     __tablename__ = "storage_objects"
 

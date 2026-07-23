@@ -1,20 +1,42 @@
 from __future__ import annotations
 
+import json
+import os
 from time import perf_counter
 from typing import Any
 
+from celery import Celery, chain, chord, group
 from fastapi import HTTPException
+from openai import OpenAI
 from opentelemetry import metrics
 from orbital_semconv import current_trace_ids, emit_event, traced
 from orbital_shared.api import create_service
-from orbital_shared.campaigns import stable_identifier, versioned_path
+from orbital_shared.campaigns import (
+    deterministic_trace_id,
+    stable_identifier,
+    versioned_path,
+)
 from orbital_shared.database import (
+    AdaptiveBranchRecord,
     CapsuleRecord,
     MutationRecord,
     ObjectStore,
+    RangeCampaignRecord,
+    RangeScoreRecord,
 )
-from orbital_shared.models import MissionCapsule, ReplayMutation, sha256_digest
+from orbital_shared.models import MissionCapsule, ReplayMutation, sha256_digest, utcnow
 from orbital_shared.object_storage import IntegrityError, VersionedObjectStorage
+from orbital_shared.range_evaluation import (
+    BEAM_WIDTH,
+    MAX_GENERATIONS,
+    SCORING_VERSION,
+    SELECTION_SIZE,
+    AdaptiveProposal,
+    branch_identifier,
+    fallback_proposals,
+    rank_mutations,
+    selection_digest,
+)
 from orbital_shared.range_mutations import (
     DEFAULT_MUTATION_COUNT,
     DEFAULT_MUTATION_SEED,
@@ -64,9 +86,105 @@ class MutationValidationRequest(BaseModel):
 
 class AdaptiveRequest(BaseModel):
     mutation_ids: list[str] | None = None
-    top_k: int = 64
-    beam_width: int = 4
-    generations: int = 5
+    top_k: int = Field(default=SELECTION_SIZE, ge=SELECTION_SIZE, le=SELECTION_SIZE)
+    beam_width: int = Field(default=BEAM_WIDTH, ge=BEAM_WIDTH, le=BEAM_WIDTH)
+    generations: int = Field(
+        default=MAX_GENERATIONS, ge=MAX_GENERATIONS, le=MAX_GENERATIONS
+    )
+    force_deterministic_fallback: bool = False
+
+
+def _celery() -> Celery:
+    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    return Celery(
+        "orbital-range-client",
+        broker=redis_url,
+        backend=os.getenv(
+            "CELERY_RESULT_BACKEND", redis_url.rsplit("/", 1)[0] + "/1"
+        ),
+    )
+
+
+def _ollama_proposals(generations: int) -> tuple[list[AdaptiveProposal], str]:
+    if os.getenv("RANGE_FORCE_DETERMINISTIC_FALLBACK", "").lower() in {
+        "1",
+        "true",
+        "yes",
+    }:
+        raise RuntimeError("deterministic fallback forced by configuration")
+    client = OpenAI(
+        base_url=os.getenv("OLLAMA_BASE_URL", "http://ollama:11434/v1"),
+        api_key="ollama-local",
+        timeout=3.0,
+        max_retries=0,
+    )
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["proposals"],
+        "properties": {
+            "proposals": {
+                "type": "array",
+                "minItems": generations * BEAM_WIDTH,
+                "maxItems": generations * BEAM_WIDTH,
+                "items": AdaptiveProposal.model_json_schema(),
+            }
+        },
+    }
+    response = client.chat.completions.create(
+        model=os.getenv("OLLAMA_MODEL", "qwen3:8b"),
+        temperature=0,
+        max_tokens=1024,
+        response_format={
+            "type": "json_schema",
+            "json_schema": {"name": "orbital_range_proposals", "schema": schema},
+        },
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "Return only schema-valid synthetic local test transformations. "
+                    "Create four proposals per generation in generation then beam "
+                    "order. Do not target external systems."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Create {generations * BEAM_WIDTH} bounded RANGE proposals "
+                    f"for {generations} generations."
+                ),
+            },
+        ],
+    )
+    payload = json.loads(response.choices[0].message.content or "{}")
+    proposals = [AdaptiveProposal.model_validate(item) for item in payload["proposals"]]
+    expected = [
+        (generation, beam)
+        for generation in range(1, generations + 1)
+        for beam in range(BEAM_WIDTH)
+    ]
+    if [(item.generation, item.beam_index) for item in proposals] != expected:
+        raise ValueError("Ollama proposals are not in complete generation/beam order")
+    return proposals, "ollama_structured"
+
+
+def _proposal_catalogue(
+    generations: int, force_fallback: bool
+) -> tuple[list[AdaptiveProposal], str, str | None]:
+    if not force_fallback:
+        try:
+            return (*_ollama_proposals(generations), None)
+        except Exception as exc:
+            fallback_reason = type(exc).__name__
+    else:
+        fallback_reason = "request_forced"
+    proposals = [
+        proposal
+        for generation in range(1, generations + 1)
+        for proposal in fallback_proposals(generation)
+    ]
+    return proposals, "deterministic_fallback", fallback_reason
 
 
 def _load_capsules(capsule_ids: list[str]) -> list[MissionCapsule]:
@@ -359,26 +477,261 @@ def validate(request: MutationValidationRequest) -> dict[str, Any]:
 
 @app.post("/v1/attacks/adapt")
 def adapt(request: AdaptiveRequest) -> dict[str, Any]:
-    all_mutations = store.list("replay_mutation", 2000)
-    selected_pool = (
-        [
-            mutation
-            for mutation in all_mutations
-            if mutation["mutation_id"] in set(request.mutation_ids)
-        ]
-        if request.mutation_ids
-        else all_mutations
-    )
-    ranked = sorted(
-        selected_pool, key=lambda value: (value["fitness"], value["generation"]), reverse=True
-    )
-    selected = ranked[: request.top_k]
+    with Session(store.engine) as session:
+        query = select(MutationRecord).order_by(MutationRecord.sequence)
+        records = list(session.scalars(query).all())
+    if request.mutation_ids:
+        requested_ids = set(request.mutation_ids)
+        records = [item for item in records if item.mutation_id in requested_ids]
+        missing = sorted(requested_ids - {item.mutation_id for item in records})
+        if missing:
+            raise HTTPException(422, f"mutations are not persisted: {missing[:5]}")
+    if len(records) != 880:
+        raise HTTPException(
+            409, f"Phase 4B requires the complete 880-mutation catalogue; found {len(records)}"
+        )
+    try:
+        mutations = [ReplayMutation.model_validate(item.payload) for item in records]
+    except ValueError as exc:
+        raise HTTPException(422, f"invalid persisted mutation schema: {exc}") from exc
+
+    catalogue_digest = mutation_catalogue_digest(mutations)
+    with traced(
+        "range.selection.score",
+        {
+            "orbital.signal.class": "campaign",
+            "orbital.execution.mode": "deterministic_simulation",
+            "orbital.range.scoring.version": SCORING_VERSION,
+            "orbital.range.catalogue.count": len(mutations),
+            "orbital.range.selection.count": request.top_k,
+            "orbital.risk.class": "high",
+        },
+    ):
+        trace_id, _ = current_trace_ids()
+        try:
+            scores, selected = rank_mutations(
+                mutations, catalogue_digest, request.top_k
+            )
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        selected_digest = selection_digest(selected)
+        proposal_catalogue, proposal_source, fallback_reason = _proposal_catalogue(
+            request.generations, request.force_deterministic_fallback
+        )
+        search_budget = len(selected) * request.beam_width * request.generations
+        submission = {
+            "catalogue_digest": catalogue_digest,
+            "selection_digest": selected_digest,
+            "beam_width": request.beam_width,
+            "generations": request.generations,
+            "search_budget": search_budget,
+            "proposal_source": proposal_source,
+            "proposal_catalogue_digest": sha256_digest(
+                [item.model_dump(mode="json") for item in proposal_catalogue]
+            ),
+        }
+        submission_digest = sha256_digest(submission)
+        campaign_id = stable_identifier("range", submission_digest)
+        now = utcnow()
+        with Session(store.engine) as session:
+            existing = session.get(RangeCampaignRecord, campaign_id)
+            if existing:
+                return {
+                    "campaign_id": existing.campaign_id,
+                    "status": existing.status,
+                    "duplicate_submission": True,
+                    "catalogue_digest": existing.catalogue_digest,
+                    "selection_digest": existing.selection_digest,
+                    "selected_count": existing.selected_count,
+                    "search": {
+                        "beam_width": existing.beam_width,
+                        "generations": existing.max_generations,
+                        "budget": existing.search_budget,
+                        "budget_used": existing.budget_used,
+                        "proposal_source": existing.proposal_source,
+                    },
+                    "trace_id": trace_id,
+                }
+            session.add(
+                RangeCampaignRecord(
+                    campaign_id=campaign_id,
+                    submission_digest=submission_digest,
+                    catalogue_digest=catalogue_digest,
+                    selection_digest=selected_digest,
+                    status="QUEUED",
+                    beam_width=request.beam_width,
+                    max_generations=request.generations,
+                    search_budget=search_budget,
+                    budget_used=0,
+                    selected_count=len(selected),
+                    proposal_source=proposal_source,
+                    result_summary={
+                        "fallback_reason": fallback_reason,
+                        "selection_trace_id": trace_id,
+                        "submission": submission,
+                    },
+                    created_at=now,
+                )
+            )
+            selected_ids = {item.mutation_id for item in selected}
+            ranks = {
+                item.mutation_id: rank
+                for rank, item in enumerate(selected, start=1)
+            }
+            for score in scores:
+                provenance = score.provenance | {
+                    "selection_digest": selected_digest,
+                    "rank": ranks.get(score.mutation_id),
+                    "selected": score.mutation_id in selected_ids,
+                }
+                session.add(
+                    RangeScoreRecord(
+                        mutation_id=score.mutation_id,
+                        campaign_id=campaign_id,
+                        rank=ranks.get(score.mutation_id),
+                        selected=score.mutation_id in selected_ids,
+                        total_score=score.total_score,
+                        factors=score.factors.model_dump(mode="json"),
+                        provenance=provenance,
+                        score_digest=score.score_digest,
+                        created_at=now,
+                    )
+                )
+
+            chains = []
+            by_generation = {
+                generation: [
+                    item
+                    for item in proposal_catalogue
+                    if item.generation == generation
+                ]
+                for generation in range(1, request.generations + 1)
+            }
+            for score in selected:
+                for beam_index in range(request.beam_width):
+                    signatures = []
+                    parent_id: str | None = None
+                    for generation in range(1, request.generations + 1):
+                        proposal = by_generation[generation][beam_index]
+                        proposal_payload = proposal.model_dump(mode="json")
+                        proposal_digest = sha256_digest(proposal_payload)
+                        branch_id = branch_identifier(
+                            campaign_id,
+                            score.mutation_id,
+                            generation,
+                            beam_index,
+                            proposal_digest,
+                        )
+                        session.add(
+                            AdaptiveBranchRecord(
+                                branch_id=branch_id,
+                                campaign_id=campaign_id,
+                                seed_mutation_id=score.mutation_id,
+                                parent_branch_id=parent_id,
+                                generation=generation,
+                                beam_index=beam_index,
+                                trace_id=deterministic_trace_id(branch_id),
+                                status="QUEUED",
+                                delivery_count=0,
+                                proposal=proposal_payload,
+                                proposal_digest=proposal_digest,
+                                created_at=now,
+                            )
+                        )
+                        signatures.append(
+                            _celery().signature(
+                                "orbital.range.execute_branch",
+                                args=[branch_id],
+                                immutable=True,
+                            )
+                        )
+                        parent_id = branch_id
+                    chains.append(chain(*signatures))
+            session.commit()
+
+        client = _celery()
+        callback = client.signature(
+            "orbital.range.complete_campaign", args=[campaign_id], immutable=True
+        )
+        async_result = chord(group(chains))(callback)
+        emit_event(
+            "range.adaptive.dispatched",
+            campaign_id=campaign_id,
+            selected_count=len(selected),
+            search_budget=search_budget,
+            proposal_source=proposal_source,
+            trace_id=trace_id,
+        )
     return {
-        "selected": selected,
+        "campaign_id": campaign_id,
+        "status": "QUEUED",
+        "duplicate_submission": False,
+        "catalogue_digest": catalogue_digest,
+        "selection_digest": selected_digest,
+        "selected_count": len(selected),
+        "selected": [
+            {
+                "rank": rank,
+                "mutation_id": item.mutation_id,
+                "total_score": item.total_score,
+                "factors": item.factors.model_dump(mode="json"),
+                "score_digest": item.score_digest,
+                "provenance": item.provenance,
+            }
+            for rank, item in enumerate(selected, start=1)
+        ],
         "search": {
             "beam_width": request.beam_width,
             "generations": request.generations,
-            "budget": request.beam_width * request.generations * max(1, len(selected_pool)),
-            "stop_reason": "top_k_valid_attacks_selected",
+            "budget": search_budget,
+            "budget_used": 0,
+            "proposal_source": proposal_source,
+            "fallback_reason": fallback_reason,
+            "celery_chord_id": str(async_result.id),
         },
+        "trace_id": trace_id,
+        "execution_mode": "deterministic_simulation",
     }
+
+
+@app.get("/v1/attacks/adapt/{campaign_id}")
+def adaptive_status(campaign_id: str) -> dict[str, Any]:
+    with Session(store.engine) as session:
+        campaign = session.get(RangeCampaignRecord, campaign_id)
+        if not campaign:
+            raise HTTPException(404, "adaptive campaign not found")
+        selected = list(
+            session.scalars(
+                select(RangeScoreRecord)
+                .where(
+                    RangeScoreRecord.campaign_id == campaign_id,
+                    RangeScoreRecord.selected.is_(True),
+                )
+                .order_by(RangeScoreRecord.rank)
+            ).all()
+        )
+        return {
+            "campaign_id": campaign.campaign_id,
+            "status": campaign.status,
+            "catalogue_digest": campaign.catalogue_digest,
+            "selection_digest": campaign.selection_digest,
+            "selected_count": campaign.selected_count,
+            "selected": [
+                {
+                    "rank": item.rank,
+                    "mutation_id": item.mutation_id,
+                    "score": item.total_score,
+                    "score_digest": item.score_digest,
+                    "provenance": item.provenance,
+                }
+                for item in selected
+            ],
+            "search": {
+                "beam_width": campaign.beam_width,
+                "generations": campaign.max_generations,
+                "budget": campaign.search_budget,
+                "budget_used": campaign.budget_used,
+                "proposal_source": campaign.proposal_source,
+            },
+            "result_summary": campaign.result_summary,
+        }
