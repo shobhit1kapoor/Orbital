@@ -10,6 +10,7 @@ RUN pnpm install --filter mission-control... --frozen-lockfile
 FROM deps AS build
 COPY apps/mission-control apps/mission-control
 RUN pnpm --filter mission-control lint
+RUN pnpm --filter mission-control typecheck
 RUN pnpm --filter mission-control build
 
 FROM node:22-alpine AS runner

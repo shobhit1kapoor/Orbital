@@ -6,6 +6,7 @@
     "dev": "pnpm --filter mission-control dev",
     "build": "pnpm --filter mission-control build",
     "lint": "pnpm --filter mission-control lint",
+    "typecheck": "pnpm --filter mission-control typecheck",
     "test:e2e": "pnpm --filter mission-control test:e2e"
   }
 }
