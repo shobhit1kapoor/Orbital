@@ -13,6 +13,7 @@ COPY contracts /workspace/contracts
 COPY policies /workspace/policies
 COPY dashboards /workspace/dashboards
 COPY alerts /workspace/alerts
+COPY collector /workspace/collector
 COPY demo /workspace/demo
 COPY tests /workspace/tests
 

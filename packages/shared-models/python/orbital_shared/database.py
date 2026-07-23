@@ -312,6 +312,88 @@ class MinimizationAttemptRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class FrontierRunRecord(Base):
+    __tablename__ = "authority_frontier_runs"
+
+    run_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    submission_digest: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    candidate_id: Mapped[str] = mapped_column(String(128), index=True)
+    artifact_digest: Mapped[str] = mapped_column(String(80), index=True)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    trial_count_per_level: Mapped[int] = mapped_column(Integer)
+    seed: Mapped[int] = mapped_column(Integer)
+    maximum_safe_authority: Mapped[str] = mapped_column(String(64))
+    source_evidence: Mapped[list[str]] = mapped_column(JSON)
+    result_payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+    result_digest: Mapped[str] = mapped_column(String(80), index=True)
+    object_path: Mapped[str] = mapped_column(Text)
+    checksum: Mapped[str] = mapped_column(String(80))
+    trace_id: Mapped[str] = mapped_column(String(32), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class FrontierPointRecord(Base):
+    __tablename__ = "authority_frontier_points"
+    __table_args__ = (
+        UniqueConstraint("run_id", "level_index", name="uq_frontier_run_level"),
+    )
+
+    point_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("authority_frontier_runs.run_id", ondelete="CASCADE"), index=True
+    )
+    candidate_id: Mapped[str] = mapped_column(String(128), index=True)
+    level_index: Mapped[int] = mapped_column(Integer, index=True)
+    authority_level: Mapped[str] = mapped_column(String(64), index=True)
+    supported: Mapped[bool] = mapped_column(Boolean, index=True)
+    metrics: Mapped[dict[str, Any]] = mapped_column(JSON)
+    point_digest: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    trace_id: Mapped[str] = mapped_column(String(32), index=True)
+    span_id: Mapped[str] = mapped_column(String(16))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class CertificationRecord(Base):
+    __tablename__ = "clearance_certifications"
+
+    certificate_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    submission_digest: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    candidate_id: Mapped[str] = mapped_column(String(128), index=True)
+    artifact_digest: Mapped[str] = mapped_column(String(80), index=True)
+    frontier_run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("authority_frontier_runs.run_id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    verdict: Mapped[str] = mapped_column(String(32), index=True)
+    granted_authority: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    evidence_payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+    certificate_payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+    certificate_digest: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    bundle_path: Mapped[str] = mapped_column(Text)
+    bundle_checksum: Mapped[str] = mapped_column(String(80))
+    trace_id: Mapped[str] = mapped_column(String(32), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class CertificateVerificationRecord(Base):
+    __tablename__ = "certificate_verifications"
+
+    verification_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    certificate_id: Mapped[str] = mapped_column(String(128), index=True)
+    request_digest: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    valid: Mapped[bool] = mapped_column(Boolean, index=True)
+    reason: Mapped[str] = mapped_column(String(64), index=True)
+    observed_artifact_digest: Mapped[str | None] = mapped_column(
+        String(80), nullable=True, index=True
+    )
+    trace_id: Mapped[str] = mapped_column(String(32), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class StorageObjectRecord(Base):
     __tablename__ = "storage_objects"
 

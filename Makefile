@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 COMPOSE := docker compose --env-file .env -f infra/docker-compose.yaml
 
-.PHONY: bootstrap dev down seed certify hero-demo inject-drift verify verify-obi verify-alerts campaign pause-campaign resume-campaign recover-campaign verify-campaign generate-capsules run-range verify-metamorphic causal-analysis minimize-hero-failure verify-causal reset-demo test build signoz provision-signoz
+.PHONY: bootstrap dev down seed certify hero-demo inject-drift verify verify-obi verify-alerts campaign pause-campaign resume-campaign recover-campaign verify-campaign generate-capsules run-range verify-metamorphic causal-analysis minimize-hero-failure verify-causal phase5-services authority-frontier certify-full verify-certificate verify-clearance reset-demo test build signoz provision-signoz
 
 bootstrap:
 	bash ./demo/bootstrap.sh
@@ -144,6 +144,42 @@ verify-causal:
 	$(COMPOSE) --profile tools build demo-runner
 	$(COMPOSE) --profile tools run --rm --no-deps demo-runner \
 		python /workspace/demo/phase4c_causal.py verify
+
+phase5-services:
+	$(COMPOSE) up -d postgres redis minio otel-collector certifier
+	$(COMPOSE) --profile tools build demo-runner
+
+authority-frontier: phase5-services
+	$(COMPOSE) build certifier
+	$(COMPOSE) up -d --force-recreate certifier
+	$(COMPOSE) build agent-runtime
+	@set -euo pipefail; \
+		agent_digest="$$(docker image inspect infra-agent-runtime:latest --format '{{.Id}}')"; \
+		$(COMPOSE) --profile tools run --rm --no-deps \
+			-e ORBITAL_CONTAINER_DIGEST="$$agent_digest" demo-runner \
+			python /workspace/demo/phase5_clearance.py frontier
+	@sleep 6
+
+certify-full: phase5-services
+	@set -euo pipefail; \
+		agent_digest="$$(docker image inspect infra-agent-runtime:latest --format '{{.Id}}')"; \
+		$(COMPOSE) --profile tools run --rm --no-deps \
+			-e ORBITAL_CONTAINER_DIGEST="$$agent_digest" demo-runner \
+			python /workspace/demo/phase5_clearance.py certify
+
+verify-certificate: phase5-services
+	@set -euo pipefail; \
+		agent_digest="$$(docker image inspect infra-agent-runtime:latest --format '{{.Id}}')"; \
+		$(COMPOSE) --profile tools run --rm --no-deps \
+			-e ORBITAL_CONTAINER_DIGEST="$$agent_digest" demo-runner \
+			python /workspace/demo/phase5_clearance.py verify-certificate
+
+verify-clearance: phase5-services
+	@set -euo pipefail; \
+		agent_digest="$$(docker image inspect infra-agent-runtime:latest --format '{{.Id}}')"; \
+		$(COMPOSE) --profile tools run --rm --no-deps \
+			-e ORBITAL_CONTAINER_DIGEST="$$agent_digest" demo-runner \
+			python /workspace/demo/phase5_clearance.py verify-clearance
 
 reset-demo:
 	$(COMPOSE) down --remove-orphans

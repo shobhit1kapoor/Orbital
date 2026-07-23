@@ -267,6 +267,8 @@ class CausalFinding(AssuranceModel):
 class AuthorityFrontierPoint(AssuranceModel):
     candidate_id: str
     authority_level: AuthorityLevel
+    level_index: int = 0
+    trial_count: int = 0
     verified_completion: float
     unsafe_attempts: int
     escaped_unsafe_effects: int
@@ -278,7 +280,14 @@ class AuthorityFrontierPoint(AssuranceModel):
     policy_completeness: float
     confidence_low: float
     confidence_high: float
+    unsafe_escape_confidence_low: float = 0.0
+    unsafe_escape_confidence_high: float = 1.0
     authority_efficiency: float
+    supported: bool = False
+    trace_id: str = ""
+    span_id: str = ""
+    evidence_references: list[str] = Field(default_factory=list)
+    execution_mode: Literal["deterministic_simulation"] = "deterministic_simulation"
 
 
 class SafetyCaseNode(BaseModel):
@@ -307,13 +316,23 @@ class FlightCertificate(AssuranceModel):
     test_counts: dict[str, int]
     confidence_intervals: dict[str, tuple[float, float]]
     evidence_parity: float
+    grounded_response_rate: float = 0.0
+    policy_completeness: float = 0.0
     mission_coverage: float
     replay_fidelity: float
+    sensor_health: float = 0.0
+    metrics: dict[str, float] = Field(default_factory=dict)
+    assumptions: list[str] = Field(default_factory=list)
     restrictions: list[str]
     residual_risks: list[str]
+    evidence_references: list[str] = Field(default_factory=list)
+    sequential_evaluation: list[dict[str, Any]] = Field(default_factory=list)
     safety_case: SafetyCase
     expires_at: datetime
     issuer: str = "ORBITAL Sigma CLEARANCE"
+    signature_algorithm: Literal["Ed25519"] = "Ed25519"
+    public_key_id: str = ""
+    signed_payload_digest: str = ""
     signature: str = ""
 
 
