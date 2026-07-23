@@ -2,15 +2,32 @@ from __future__ import annotations
 
 import os
 import time
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 import httpx
 from fastapi import HTTPException
 from openai import AsyncOpenAI
-from orbital_semconv import ATTRIBUTES, SPANS, current_trace_ids, traced
+from opentelemetry import metrics
+from orbital_semconv import (
+    ATTRIBUTES,
+    SPANS,
+    current_trace_ids,
+    emit_event,
+    traced,
+)
 from orbital_shared.api import create_service
-from orbital_shared.models import Correlation, sha256_digest
+from orbital_shared.database import (
+    DelegationEventRecord,
+    DelegationEvidenceRecord,
+    ObjectStore,
+    Session,
+)
+from orbital_shared.delegation import evaluate_delegation, policy_input
+from orbital_shared.models import Correlation, DelegationRequest, sha256_digest, utcnow
+from orbital_shared.object_storage import VersionedObjectStorage
 from pydantic import BaseModel
+from sqlalchemy import select
 
 app = create_service("ORBITAL Σ Agent Runtime", "orbital-agent-runtime")
 GATEWAY_URL = os.getenv("ACTION_GATEWAY_URL", "http://action-gateway:8000")
@@ -18,6 +35,16 @@ MOCK_MCP_URL = os.getenv("MOCK_MCP_URL", "http://mock-mcp-tool:8000")
 EVIDENCE_RECONCILER_URL = os.getenv(
     "EVIDENCE_RECONCILER_URL", "http://evidence-reconciler:8000"
 )
+CERTIFIER_URL = os.getenv("CERTIFIER_URL", "http://certifier:8000")
+OPA_URL = os.getenv("OPA_URL", "http://opa:8181")
+store = ObjectStore()
+object_storage = VersionedObjectStorage()
+meter = metrics.get_meter("orbital-agent-runtime")
+delegation_counter = meter.create_counter("orbital.delegation.evaluations")
+delegation_denial_counter = meter.create_counter("orbital.delegation.denials")
+delegation_unknown_counter = meter.create_counter("orbital.delegation.unknown")
+delegation_depth_histogram = meter.create_histogram("orbital.delegation.depth")
+delegation_risk_histogram = meter.create_histogram("orbital.delegation.risk_budget")
 
 
 class MissionRequest(BaseModel):
@@ -38,6 +65,325 @@ class MissionRequest(BaseModel):
 class ResumeRequest(BaseModel):
     approval_id: str
     approved: bool
+
+
+def _delegation_attributes(request: DelegationRequest) -> dict[str, Any]:
+    return {
+        ATTRIBUTES["mission_id"]: request.mission_id,
+        ATTRIBUTES["action_id"]: request.action_id,
+        ATTRIBUTES["delegation_id"]: request.delegation_id,
+        ATTRIBUTES["delegator_id"]: request.delegator.agent_id,
+        ATTRIBUTES["delegate_id"]: request.delegate.agent_id,
+        ATTRIBUTES["parent_certificate_id"]: request.delegator.certificate.certificate_id,
+        ATTRIBUTES["child_certificate_id"]: request.delegate.certificate.certificate_id,
+        ATTRIBUTES["delegated_tools"]: ",".join(sorted(request.delegated_tools)),
+        ATTRIBUTES["authority_level"]: str(request.delegated_authority),
+        ATTRIBUTES["delegated_risk_budget"]: request.delegated_risk_budget,
+        ATTRIBUTES["data_labels"]: ",".join(sorted(request.data_labels)),
+        ATTRIBUTES["delegation_depth"]: request.delegation_depth,
+        ATTRIBUTES["delegation_expiration"]: request.expires_at.isoformat(),
+        ATTRIBUTES["execution_mode"]: "deterministic_simulation",
+    }
+
+
+async def _verify_delegation_certificate(
+    client: httpx.AsyncClient,
+    *,
+    role: str,
+    request: DelegationRequest,
+) -> dict[str, Any] | None:
+    identity = request.delegator if role == "parent" else request.delegate
+    try:
+        response = await client.post(
+            f"{CERTIFIER_URL}/v1/certificates/{identity.certificate.certificate_id}/verify",
+            json={
+                "certificate": identity.certificate.model_dump(mode="json"),
+                "observed_artifact": identity.observed_artifact.model_dump(mode="json"),
+                "verification_nonce": f"phase6:{request.delegation_id}:{role}",
+            },
+        )
+        response.raise_for_status()
+        return response.json()
+    except (httpx.HTTPError, ValueError):
+        return None
+
+
+async def _opa_delegation_decision(
+    client: httpx.AsyncClient,
+    values: dict[str, Any],
+) -> bool | None:
+    try:
+        response = await client.post(
+            f"{OPA_URL}/v1/data/orbital/delegation/allow",
+            json={"input": values},
+        )
+        response.raise_for_status()
+        payload = response.json()
+        return bool(payload["result"]) if "result" in payload else None
+    except (httpx.HTTPError, ValueError, KeyError):
+        return None
+
+
+def _delegation_evidence_rows(
+    request: DelegationRequest,
+    *,
+    trace_id: str,
+    parent_verification: dict[str, Any] | None,
+    child_verification: dict[str, Any] | None,
+    opa_allowed: bool | None,
+    gate_result: dict[str, Any] | None,
+) -> list[DelegationEvidenceRecord]:
+    values = [
+        (
+            "parent_certificate",
+            "CONFIRMED" if parent_verification and parent_verification.get("valid") else "UNKNOWN",
+            (
+                f"signoz://trace/{parent_verification['trace_id']}"
+                if parent_verification and parent_verification.get("trace_id")
+                else "unavailable"
+            ),
+            parent_verification,
+        ),
+        (
+            "child_certificate",
+            "CONFIRMED" if child_verification and child_verification.get("valid") else "UNKNOWN",
+            (
+                f"signoz://trace/{child_verification['trace_id']}"
+                if child_verification and child_verification.get("trace_id")
+                else "unavailable"
+            ),
+            child_verification,
+        ),
+        (
+            "opa_decision",
+            "CONFIRMED" if opa_allowed is not None else "UNKNOWN",
+            f"signoz://trace/{trace_id}",
+            {"allowed": opa_allowed},
+        ),
+        (
+            "gate_capability",
+            "CONFIRMED" if gate_result is not None else "UNKNOWN",
+            f"signoz://trace/{trace_id}",
+            gate_result,
+        ),
+    ]
+    return [
+        DelegationEvidenceRecord(
+            evidence_id=f"de_{sha256_digest([request.delegation_id, kind])[7:31]}",
+            delegation_id=request.delegation_id,
+            evidence_type=kind,
+            state=state,
+            reference=reference,
+            payload_digest=sha256_digest(payload),
+            trace_id=trace_id,
+            created_at=utcnow(),
+        )
+        for kind, state, reference, payload in values
+    ]
+
+
+@app.post("/v1/delegations/evaluate")
+async def evaluate_delegation_chain(request: DelegationRequest) -> dict[str, Any]:
+    request_digest = request.digest
+    with Session(store.engine) as session:
+        existing = session.scalar(
+            select(DelegationEventRecord).where(
+                DelegationEventRecord.request_digest == request_digest
+            )
+        )
+        if existing is not None:
+            return {**existing.response_payload, "duplicate_submission": True}
+
+    attributes = _delegation_attributes(request)
+    with traced(SPANS["delegate"], attributes) as span:
+        trace_id, span_id = current_trace_ids()
+        effect_count_before = store.count("tool_receipt")
+        async with httpx.AsyncClient(timeout=10) as client:
+            parent_verification = await _verify_delegation_certificate(
+                client, role="parent", request=request
+            )
+            child_verification = await _verify_delegation_certificate(
+                client, role="child", request=request
+            )
+            parent_valid = (
+                bool(parent_verification.get("valid"))
+                if request.evidence_available and parent_verification
+                else None
+            )
+            child_valid = (
+                bool(child_verification.get("valid"))
+                if request.evidence_available and child_verification
+                else None
+            )
+            values = policy_input(
+                request,
+                parent_certificate_valid=parent_valid,
+                child_certificate_valid=child_valid,
+                now=datetime.now(UTC),
+            )
+            with traced(
+                SPANS["authorize"],
+                attributes | {"orbital.policy.path": "orbital/delegation/allow"},
+            ):
+                opa_allowed = await _opa_delegation_decision(client, values)
+                if not request.evidence_available:
+                    opa_allowed = None
+            decision = evaluate_delegation(
+                request,
+                parent_certificate_valid=parent_valid,
+                child_certificate_valid=child_valid,
+                opa_allowed=opa_allowed,
+                now=datetime.now(UTC),
+                trace_id=trace_id,
+                span_id=span_id,
+                evidence_references=[
+                    f"signoz://trace/{trace_id}",
+                    *[
+                        f"signoz://trace/{value['trace_id']}"
+                        for value in (parent_verification, child_verification)
+                        if value and value.get("trace_id")
+                    ],
+                ],
+            )
+            gate_result: dict[str, Any] | None = None
+            if request.attempted_tool:
+                correlation = Correlation(
+                    mission_id=request.mission_id,
+                    action_id=request.action_id,
+                    candidate_id=request.delegate.agent_id,
+                    artifact_digest=request.delegate.observed_artifact.digest,
+                    certificate_id=request.delegate.certificate.certificate_id,
+                    trace_id=trace_id,
+                    span_id=span_id,
+                )
+                gateway_payload = {
+                    "correlation": correlation.model_dump(mode="json"),
+                    "tool": request.attempted_tool,
+                    "semantic_action": request.attempted_tool,
+                    "tenant_id": request.delegate.tenant_id,
+                    "order_id": request.order_id,
+                    "amount": request.amount,
+                    "amount_paid": request.amount_paid,
+                    "order_verified": True,
+                    "human_approved": False,
+                    "certificate_maximum_amount": (
+                        request.delegate.certificate.maximum_refund_usd
+                    ),
+                    "certificate_artifact_digest": (
+                        request.delegate.certificate.artifact.digest
+                    ),
+                    "telemetry_complete": True,
+                    "delegation_id": request.delegation_id,
+                    "delegation_allowed": decision.allow,
+                    "delegation_evidence_state": decision.evidence_state,
+                }
+                try:
+                    gate_response = await client.post(
+                        f"{GATEWAY_URL}/v1/capabilities/issue",
+                        json=gateway_payload,
+                    )
+                    gate_result = {
+                        "status_code": gate_response.status_code,
+                        "capability_issued": gate_response.status_code < 400,
+                        "response": gate_response.json(),
+                    }
+                except (httpx.HTTPError, ValueError) as exc:
+                    gate_result = {
+                        "status_code": 503,
+                        "capability_issued": False,
+                        "error": type(exc).__name__,
+                    }
+        effect_count = store.count("tool_receipt")
+        external_effect_occurred = effect_count > effect_count_before
+        response = {
+            "delegation": request.model_dump(mode="json"),
+            "decision": decision.model_dump(mode="json"),
+            "certificate_verification": {
+                "parent": parent_verification,
+                "child": child_verification,
+            },
+            "gate": gate_result,
+            "external_effect_count_before": effect_count_before,
+            "external_effect_count": effect_count,
+            "external_effect_occurred": external_effect_occurred,
+            "trace_id": trace_id,
+            "span_id": span_id,
+            "duplicate_submission": False,
+        }
+        object_path = (
+            f"delegation-events/v1/{request.delegation_id}/"
+            f"{decision.digest.removeprefix('sha256:')}/event.json"
+        )
+        stored = object_storage.put_json(
+            object_path,
+            "delegation_event",
+            request.delegation_id,
+            response,
+        )
+        response["storage"] = stored
+        with Session(store.engine) as session:
+            session.add(
+                DelegationEventRecord(
+                    delegation_id=request.delegation_id,
+                    request_digest=request_digest,
+                    mission_id=request.mission_id,
+                    action_id=request.action_id,
+                    delegator_id=request.delegator.agent_id,
+                    delegate_id=request.delegate.agent_id,
+                    parent_certificate_id=request.delegator.certificate.certificate_id,
+                    child_certificate_id=request.delegate.certificate.certificate_id,
+                    delegated_tools=sorted(request.delegated_tools),
+                    delegated_authority=str(request.delegated_authority),
+                    delegated_risk_budget=request.delegated_risk_budget,
+                    data_labels=sorted(request.data_labels),
+                    delegation_depth=request.delegation_depth,
+                    expires_at=request.expires_at,
+                    evidence_state=str(decision.evidence_state),
+                    allowed=decision.allow,
+                    detections=decision.detections,
+                    reasons=decision.reasons,
+                    policy_input_digest=decision.policy_input_digest,
+                    response_payload=response,
+                    object_path=stored["path"],
+                    checksum=stored["checksum"],
+                    trace_id=trace_id,
+                    span_id=span_id,
+                    created_at=utcnow(),
+                )
+            )
+            session.flush()
+            for evidence in _delegation_evidence_rows(
+                request,
+                trace_id=trace_id,
+                parent_verification=parent_verification,
+                child_verification=child_verification,
+                opa_allowed=opa_allowed,
+                gate_result=gate_result,
+            ):
+                session.add(evidence)
+            session.commit()
+        delegation_counter.add(1, {"state": str(decision.evidence_state)})
+        if not decision.allow:
+            delegation_denial_counter.add(1, {"detection": ",".join(decision.detections)})
+        if str(decision.evidence_state) == "UNKNOWN":
+            delegation_unknown_counter.add(1)
+        delegation_depth_histogram.record(request.delegation_depth)
+        delegation_risk_histogram.record(request.delegated_risk_budget)
+        span.set_attribute(ATTRIBUTES["evidence_state"], str(decision.evidence_state))
+        span.set_attribute(ATTRIBUTES["policy_decision"], "allow" if decision.allow else "deny")
+        span.set_attribute("orbital.delegation.detections", ",".join(decision.detections))
+        span.set_attribute("orbital.external_effect.occurred", external_effect_occurred)
+        emit_event(
+            "delegation_evaluated",
+            delegation_id=request.delegation_id,
+            mission_id=request.mission_id,
+            evidence_state=decision.evidence_state,
+            allowed=decision.allow,
+            detections=decision.detections,
+            trace_id=trace_id,
+            object_path=stored["path"],
+        )
+        return response
 
 
 def _profile(candidate_id: str) -> dict[str, Any]:

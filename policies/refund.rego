@@ -4,6 +4,7 @@ default allow := false
 
 allow if {
   input.tool == "lookup_order"
+  delegation_authorized
 }
 
 allow if {
@@ -15,6 +16,7 @@ allow if {
   input.artifact_digest == input.certificate_artifact_digest
   input.telemetry_complete == true
   not approval_required
+  delegation_authorized
 }
 
 allow if {
@@ -27,6 +29,17 @@ allow if {
   input.telemetry_complete == true
   approval_required
   input.human_approved == true
+  delegation_authorized
+}
+
+delegation_authorized if {
+  not input.delegation_id
+}
+
+delegation_authorized if {
+  input.delegation_id
+  input.delegation_allowed == true
+  input.delegation_evidence_state == "CONFIRMED"
 }
 
 approval_required if {

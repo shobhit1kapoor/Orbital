@@ -147,8 +147,19 @@ services:
       DATABASE_URL: postgresql+psycopg://orbital:orbital@postgres:5432/orbital
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
       EVIDENCE_RECONCILER_URL: http://evidence-reconciler:8000
+      ACTION_GATEWAY_URL: http://action-gateway:8000
+      CERTIFIER_URL: http://certifier:8000
+      OPA_URL: http://opa:8181
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434/v1}
     ports: ["8002:8000"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      minio: { condition: service_healthy }
+      otel-collector: { condition: service_healthy }
+      opa: { condition: service_healthy }
+      action-gateway: { condition: service_healthy }
+      certifier: { condition: service_healthy }
 
   mock-mcp-tool:
     <<: *python-service

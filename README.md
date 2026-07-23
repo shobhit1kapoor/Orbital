@@ -55,6 +55,8 @@ The current local workflow executes real HTTP services and exports real OpenTele
 - persistent PostgreSQL campaign metadata, versioned MinIO artifacts, Celery group/chord replay execution, recovery, and reconnectable SSE progress;
 - six-point authority-frontier evaluation;
 - Ed25519-signed CLEARANCE certificates;
+- certificate-bound multi-agent delegation with authority, risk, tenant, and
+  data-label conservation plus an idempotent authority-laundering denial demo;
 - WATCHTOWER drift suspension and idempotent rollback;
 - native Ubuntu OBI/eBPF evidence validation restricted to the project containers;
 - six provisioned SigNoz dashboards and twelve alert rules;

@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 COMPOSE := docker compose --env-file .env -f infra/docker-compose.yaml
 
-.PHONY: bootstrap dev down seed certify hero-demo inject-drift verify verify-obi verify-alerts campaign pause-campaign resume-campaign recover-campaign verify-campaign generate-capsules run-range verify-metamorphic causal-analysis minimize-hero-failure verify-causal phase5-services authority-frontier certify-full verify-certificate verify-clearance reset-demo test build signoz provision-signoz
+.PHONY: bootstrap dev down seed certify hero-demo inject-drift verify verify-obi verify-alerts campaign pause-campaign resume-campaign recover-campaign verify-campaign generate-capsules run-range verify-metamorphic causal-analysis minimize-hero-failure verify-causal phase5-services authority-frontier certify-full verify-certificate verify-clearance phase6-services delegation-demo verify-delegation reset-demo test build signoz provision-signoz
 
 bootstrap:
 	bash ./demo/bootstrap.sh
@@ -180,6 +180,20 @@ verify-clearance: phase5-services
 		$(COMPOSE) --profile tools run --rm --no-deps \
 			-e ORBITAL_CONTAINER_DIGEST="$$agent_digest" demo-runner \
 			python /workspace/demo/phase5_clearance.py verify-clearance
+
+phase6-services:
+	$(COMPOSE) up --build -d postgres redis minio otel-collector opa action-gateway certifier agent-runtime
+	$(COMPOSE) restart otel-collector
+	$(COMPOSE) --profile tools build demo-runner
+
+delegation-demo: phase6-services
+	$(COMPOSE) --profile tools run --rm --no-deps demo-runner \
+		python /workspace/demo/phase6_delegation.py demo
+	@sleep 8
+
+verify-delegation: phase6-services
+	$(COMPOSE) --profile tools run --rm --no-deps demo-runner \
+		python /workspace/demo/phase6_delegation.py verify
 
 reset-demo:
 	$(COMPOSE) down --remove-orphans

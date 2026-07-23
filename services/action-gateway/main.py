@@ -41,6 +41,9 @@ class ActionRequest(BaseModel):
     certificate_maximum_amount: float
     certificate_artifact_digest: str
     telemetry_complete: bool
+    delegation_id: str | None = None
+    delegation_allowed: bool | None = None
+    delegation_evidence_state: str | None = None
 
 
 def _local_allow(action: ActionRequest) -> tuple[bool, list[str]]:
@@ -57,6 +60,11 @@ def _local_allow(action: ActionRequest) -> tuple[bool, list[str]]:
         reasons.append("human_approval_required")
     if not action.telemetry_complete:
         reasons.append("missing_telemetry")
+    if action.delegation_id and (
+        action.delegation_allowed is not True
+        or action.delegation_evidence_state != "CONFIRMED"
+    ):
+        reasons.append("delegation_not_authorized")
     return not reasons, reasons
 
 
@@ -73,6 +81,9 @@ async def _authorize(action: ActionRequest) -> PolicyDecision:
         "telemetry_complete": action.telemetry_complete,
         "human_approved": action.human_approved,
         "human_approval_above": 50,
+        "delegation_id": action.delegation_id,
+        "delegation_allowed": action.delegation_allowed,
+        "delegation_evidence_state": action.delegation_evidence_state,
     }
     try:
         async with httpx.AsyncClient(timeout=2) as client:
@@ -144,8 +155,26 @@ async def authorize(action: ActionRequest) -> dict[str, Any]:
 @app.post("/v1/capabilities/issue")
 async def issue_capability(action: ActionRequest) -> dict[str, Any]:
     decision = await _authorize(action)
-    if not decision.allow:
-        raise HTTPException(403, {"decision_id": decision.decision_id, "reasons": decision.reasons})
+    store.put(
+        decision.decision_id,
+        "policy_decision",
+        decision.model_dump(mode="json"),
+        decision.created_at,
+    )
+    attributes = {
+        ATTRIBUTES["mission_id"]: action.correlation.mission_id,
+        ATTRIBUTES["action_id"]: action.correlation.action_id,
+        ATTRIBUTES["action_type"]: action.tool,
+        ATTRIBUTES["policy_decision"]: "allow" if decision.allow else "deny",
+        "orbital.delegation.id": action.delegation_id or "",
+        "orbital.capability.issued": decision.allow,
+    }
+    with traced(SPANS["authorize"], attributes), traced(SPANS["capability"], attributes):
+        if not decision.allow:
+            raise HTTPException(
+                403,
+                {"decision_id": decision.decision_id, "reasons": decision.reasons},
+            )
     arguments = {
         "tool": action.tool,
         "order_id": action.order_id,

@@ -345,3 +345,57 @@ class AttestationEvent(AssuranceModel):
     condition: str
     severity: Literal["info", "warning", "critical"]
     trace_id: str | None = None
+
+
+class DelegationAgentIdentity(BaseModel):
+    agent_id: str
+    tenant_id: str
+    certificate: FlightCertificate
+    observed_artifact: ArtifactIdentity
+    claimed_artifact_digest: str
+    allowed_tools: list[str] = Field(default_factory=list)
+    data_labels: list[str] = Field(default_factory=list)
+
+
+class DelegationRequest(AssuranceModel):
+    delegation_id: str = Field(default_factory=lambda: f"dlg_{uuid4().hex[:16]}")
+    mission_id: str
+    action_id: str
+    delegator: DelegationAgentIdentity
+    delegate: DelegationAgentIdentity
+    parent_delegation_id: str | None = None
+    delegated_tools: list[str]
+    delegated_authority: AuthorityLevel
+    delegated_risk_budget: float = Field(ge=0)
+    parent_remaining_risk_budget: float = Field(ge=0)
+    data_labels: list[str] = Field(default_factory=list)
+    delegation_depth: int = Field(ge=1)
+    maximum_depth: int = Field(default=3, ge=1)
+    delegation_path: list[str] = Field(default_factory=list)
+    expires_at: datetime
+    responsibility_owner: str | None = None
+    shared_memory_tenants: list[str] = Field(default_factory=list)
+    evidence_available: bool = True
+    attempted_tool: str | None = None
+    order_id: str = "ORD-DELEGATION-001"
+    amount: float = Field(default=25.0, ge=0)
+    amount_paid: float = Field(default=100.0, ge=0)
+
+
+class DelegationDecision(AssuranceModel):
+    delegation_id: str
+    mission_id: str
+    action_id: str
+    allow: bool
+    evidence_state: EvidenceState
+    reasons: list[str] = Field(default_factory=list)
+    detections: list[str] = Field(default_factory=list)
+    policy_path: str = "orbital/delegation/allow"
+    policy_revision: str = "dev-v1"
+    policy_input_digest: str
+    opa_allowed: bool | None = None
+    parent_certificate_valid: bool | None = None
+    child_certificate_valid: bool | None = None
+    trace_id: str = ""
+    span_id: str = ""
+    evidence_references: list[str] = Field(default_factory=list)

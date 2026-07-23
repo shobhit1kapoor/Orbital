@@ -394,6 +394,59 @@ class CertificateVerificationRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class DelegationEventRecord(Base):
+    __tablename__ = "delegation_events"
+
+    delegation_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    request_digest: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    mission_id: Mapped[str] = mapped_column(String(128), index=True)
+    action_id: Mapped[str] = mapped_column(String(128), index=True)
+    delegator_id: Mapped[str] = mapped_column(String(128), index=True)
+    delegate_id: Mapped[str] = mapped_column(String(128), index=True)
+    parent_certificate_id: Mapped[str] = mapped_column(String(128), index=True)
+    child_certificate_id: Mapped[str] = mapped_column(String(128), index=True)
+    delegated_tools: Mapped[list[str]] = mapped_column(JSON)
+    delegated_authority: Mapped[str] = mapped_column(String(64), index=True)
+    delegated_risk_budget: Mapped[float] = mapped_column(Float)
+    data_labels: Mapped[list[str]] = mapped_column(JSON)
+    delegation_depth: Mapped[int] = mapped_column(Integer)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    evidence_state: Mapped[str] = mapped_column(String(32), index=True)
+    allowed: Mapped[bool] = mapped_column(Boolean, index=True)
+    detections: Mapped[list[str]] = mapped_column(JSON)
+    reasons: Mapped[list[str]] = mapped_column(JSON)
+    policy_input_digest: Mapped[str] = mapped_column(String(80), index=True)
+    response_payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+    object_path: Mapped[str] = mapped_column(Text)
+    checksum: Mapped[str] = mapped_column(String(80))
+    trace_id: Mapped[str] = mapped_column(String(32), index=True)
+    span_id: Mapped[str] = mapped_column(String(16))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class DelegationEvidenceRecord(Base):
+    __tablename__ = "delegation_evidence"
+    __table_args__ = (
+        UniqueConstraint(
+            "delegation_id",
+            "evidence_type",
+            name="uq_delegation_evidence_type",
+        ),
+    )
+
+    evidence_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    delegation_id: Mapped[str] = mapped_column(
+        ForeignKey("delegation_events.delegation_id", ondelete="CASCADE"),
+        index=True,
+    )
+    evidence_type: Mapped[str] = mapped_column(String(64), index=True)
+    state: Mapped[str] = mapped_column(String(32), index=True)
+    reference: Mapped[str] = mapped_column(Text)
+    payload_digest: Mapped[str] = mapped_column(String(80))
+    trace_id: Mapped[str] = mapped_column(String(32), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class StorageObjectRecord(Base):
     __tablename__ = "storage_objects"
 
