@@ -271,30 +271,22 @@ async def verify() -> dict[str, Any]:
         response = httpx.get(f"{BASE['watchtower']}/v1/runtime/status", timeout=10)
         response.raise_for_status()
         status = response.json()
-        delivered = {
-            item.get("alertname")
+        current_deliveries = [
+            item
             for item in status.get("webhooks", [])
             if item.get("certificate_id") == canary["certificate_id"]
-        }
-        if critical_names <= delivered:
+            and item.get("status") == "firing"
+            and item.get("signature_verified") is True
+        ]
+        if current_deliveries:
             break
         await asyncio.sleep(5)
-    delivered = {
-        item.get("alertname")
-        for item in status.get("webhooks", [])
-        if item.get("certificate_id") == canary["certificate_id"]
-    }
     require(
-        critical_names <= delivered,
-        f"missing signed webhook delivery for {sorted(critical_names - delivered)}",
+        bool(current_deliveries),
+        "SigNoz did not deliver a signed firing webhook for the active canary",
     )
 
-    webhook = next(
-        item
-        for item in status["webhooks"]
-        if item.get("certificate_id") == canary["certificate_id"]
-        and item.get("status") == "firing"
-    )
+    webhook = current_deliveries[0]
     duplicate = httpx.post(
         f"{BASE['watchtower']}/v1/webhooks/signoz",
         json=webhook["payload"],

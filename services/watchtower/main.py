@@ -49,6 +49,15 @@ def _active_rollout() -> dict[str, Any] | None:
         }
 
 
+def _certificate_for_candidate(candidate_id: str | None) -> str | None:
+    if not candidate_id:
+        return None
+    for certificate in store.list("certificate", 100):
+        if certificate.get("candidate_id") == candidate_id:
+            return str(certificate["certificate_id"])
+    return None
+
+
 def _rollback(
     certificate_id: str,
     reason: str,
@@ -178,6 +187,7 @@ async def signoz_webhook(
     active = _active_rollout()
     certificate_id = str(
         payload.get("certificate_id")
+        or _certificate_for_candidate(payload.get("candidate_id"))
         or (active.get("certificate_id") if active else None)
         or "unknown"
     )
