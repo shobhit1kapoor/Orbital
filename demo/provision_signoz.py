@@ -97,6 +97,10 @@ def alert_payload(alert: dict) -> dict:
             "fieldDataType": "string",
         },
     ]
+    if alert["name"] == "ORBITAL Uncertified Agent Execution":
+        group_by = [
+            field for field in group_by if field["name"] != "orbital.certificate.id"
+        ]
     if signal == "metrics":
         aggregation = {
             "metricName": alert["metric"],
