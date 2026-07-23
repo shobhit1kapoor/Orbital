@@ -71,6 +71,40 @@ class CapsuleRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class MutationRecord(Base):
+    __tablename__ = "replay_mutations"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_capsule_id",
+            "category",
+            "operator",
+            "seed",
+            "sequence",
+            name="uq_mutation_provenance",
+        ),
+    )
+
+    mutation_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    source_capsule_id: Mapped[str] = mapped_column(
+        ForeignKey("mission_capsules.capsule_id", ondelete="CASCADE"), index=True
+    )
+    source_capsule_digest: Mapped[str] = mapped_column(String(80), index=True)
+    category: Mapped[str] = mapped_column(String(32), index=True)
+    operator: Mapped[str] = mapped_column(String(128), index=True)
+    operator_version: Mapped[str] = mapped_column(String(32))
+    seed: Mapped[int] = mapped_column(Integer)
+    sequence: Mapped[int] = mapped_column(Integer)
+    provenance_digest: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    mutation_digest: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    mutated_fixture_digest: Mapped[str] = mapped_column(String(80))
+    object_path: Mapped[str] = mapped_column(Text)
+    checksum: Mapped[str] = mapped_column(String(80))
+    valid: Mapped[bool] = mapped_column(Boolean, default=True)
+    reproducible: Mapped[bool] = mapped_column(Boolean, default=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class StorageObjectRecord(Base):
     __tablename__ = "storage_objects"
 

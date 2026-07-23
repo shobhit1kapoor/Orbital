@@ -129,6 +129,7 @@ class MissionContract(AssuranceModel):
 
 class MissionCapsule(AssuranceModel):
     capsule_id: str = Field(default_factory=lambda: f"cap_{uuid4().hex[:16]}")
+    corpus_version: str = "phase4a.v1"
     template: str
     variant: int = 0
     user_request: dict[str, Any]
@@ -149,12 +150,21 @@ class MissionCapsule(AssuranceModel):
 class ReplayMutation(AssuranceModel):
     mutation_id: str = Field(default_factory=lambda: f"mut_{uuid4().hex[:16]}")
     source_capsule_id: str
+    source_capsule_digest: str = ""
     category: Literal["retrieval", "memory", "tool", "infrastructure", "multi-agent"]
     operator: str
+    operator_version: str = "1.0.0"
     patch: dict[str, Any]
+    seed: int = 20260723
+    sequence: int = 0
     generation: int = 0
     fitness: float = 0.0
     valid: bool = True
+    reproducible: bool = True
+    execution_mode: Literal["deterministic_simulation"] = "deterministic_simulation"
+    mutated_fixture_digest: str = ""
+    provenance: dict[str, Any] = Field(default_factory=dict)
+    validation: dict[str, Any] = Field(default_factory=dict)
 
 
 class ReplayRun(AssuranceModel):

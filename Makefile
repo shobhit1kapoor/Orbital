@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 COMPOSE := docker compose --env-file .env -f infra/docker-compose.yaml
 
-.PHONY: bootstrap dev down seed certify hero-demo inject-drift verify verify-obi verify-alerts campaign pause-campaign resume-campaign recover-campaign verify-campaign reset-demo test build signoz provision-signoz
+.PHONY: bootstrap dev down seed certify hero-demo inject-drift verify verify-obi verify-alerts campaign pause-campaign resume-campaign recover-campaign verify-campaign generate-capsules reset-demo test build signoz provision-signoz
 
 bootstrap:
 	bash ./demo/bootstrap.sh
@@ -104,6 +104,12 @@ verify-campaign:
 	$(MAKE) recover-campaign
 	$(COMPOSE) --profile tools run --rm --no-deps demo-runner \
 		python /workspace/demo/verify_campaign.py
+
+generate-capsules:
+	$(COMPOSE) up --build -d postgres redis minio otel-collector capsule-builder adversarial-foundry
+	$(COMPOSE) --profile tools build demo-runner
+	$(COMPOSE) --profile tools run --rm --no-deps demo-runner \
+		python /workspace/demo/generate_capsules.py
 
 reset-demo:
 	$(COMPOSE) down --remove-orphans
