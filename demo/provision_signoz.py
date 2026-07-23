@@ -32,6 +32,14 @@ DASHBOARD_SQL = {
     "task-success": "SELECT countIf(status_code = 0) AS value FROM signoz_traces.distributed_signoz_index_v3 WHERE timestamp > now() - INTERVAL 24 HOUR AND name = 'agent.mission'",
     "latency": "SELECT toStartOfMinute(timestamp) AS timestamp, quantile(0.95)(duration_nano / 1000000) AS value FROM signoz_traces.distributed_signoz_index_v3 WHERE timestamp > now() - INTERVAL 24 HOUR AND name = 'agent.mission' GROUP BY timestamp ORDER BY timestamp",
     "cost": "SELECT toStartOfMinute(timestamp) AS timestamp, avg(attributes_number['orbital.cost.usd']) AS value FROM signoz_traces.distributed_signoz_index_v3 WHERE timestamp > now() - INTERVAL 24 HOUR AND name = 'agent.mission' GROUP BY timestamp ORDER BY timestamp",
+    "campaign-queue-depth": "SELECT greatest(countIf(name = 'campaign.job.queued') - countIf(name = 'replay.worker.execute'), 0) AS value FROM signoz_traces.distributed_signoz_index_v3 WHERE timestamp > now() - INTERVAL 24 HOUR",
+    "campaign-completion": "SELECT countIf(name = 'replay.worker.execute' AND attributes_bool['orbital.replay.success'] = true) AS value FROM signoz_traces.distributed_signoz_index_v3 WHERE timestamp > now() - INTERVAL 24 HOUR",
+    "worker-utilization": "SELECT uniqIf(trace_id, name = 'replay.worker.execute') AS value FROM signoz_traces.distributed_signoz_index_v3 WHERE timestamp > now() - INTERVAL 5 MINUTE",
+    "retry-rate": "SELECT countIf(name = 'replay.retry') / greatest(countIf(name = 'replay.worker.execute'), 1) AS value FROM signoz_traces.distributed_signoz_index_v3 WHERE timestamp > now() - INTERVAL 24 HOUR",
+    "replay-duration": "SELECT toStartOfMinute(timestamp) AS timestamp, quantile(0.95)(duration_nano / 1000000) AS value FROM signoz_traces.distributed_signoz_index_v3 WHERE timestamp > now() - INTERVAL 24 HOUR AND name = 'replay.worker.execute' GROUP BY timestamp ORDER BY timestamp",
+    "failed-jobs": "SELECT timestamp, trace_id, attributes_string['orbital.campaign.id'] AS campaign_id, attributes_string['orbital.replay.job_id'] AS job_id FROM signoz_traces.distributed_signoz_index_v3 WHERE timestamp > now() - INTERVAL 24 HOUR AND name = 'replay.worker.failure' ORDER BY timestamp DESC LIMIT 100",
+    "minio-latency": "SELECT toStartOfMinute(timestamp) AS timestamp, quantile(0.95)(duration_nano / 1000000) AS value FROM signoz_traces.distributed_signoz_index_v3 WHERE timestamp > now() - INTERVAL 24 HOUR AND name IN ('capsule.persist', 'replay.persist') GROUP BY timestamp ORDER BY timestamp",
+    "postgres-write-failures": "SELECT toStartOfMinute(timestamp) AS timestamp, count() AS value FROM signoz_traces.distributed_signoz_index_v3 WHERE timestamp > now() - INTERVAL 24 HOUR AND name = 'postgres.write.failure' GROUP BY timestamp ORDER BY timestamp",
 }
 
 
@@ -98,16 +106,12 @@ def alert_payload(alert: dict) -> dict:
         },
     ]
     if alert["name"] == "ORBITAL Uncertified Agent Execution":
-        group_by = [
-            field for field in group_by if field["name"] != "orbital.certificate.id"
-        ]
+        group_by = [field for field in group_by if field["name"] != "orbital.certificate.id"]
     if signal == "metrics":
         aggregation = {
             "metricName": alert["metric"],
             "timeAggregation": "latest",
-            "spaceAggregation": "min"
-            if alert.get("operator") == "below"
-            else "max",
+            "spaceAggregation": "min" if alert.get("operator") == "below" else "max",
         }
     else:
         aggregation = {"expression": "count()"}
@@ -119,8 +123,7 @@ def alert_payload(alert: dict) -> dict:
         "annotations": {
             "summary": alert["name"],
             "description": (
-                "Observed {{$value}} matching local ORBITAL signals; "
-                "trace {{$labels.trace_id}}."
+                "Observed {{$value}} matching local ORBITAL signals; trace {{$labels.trace_id}}."
             ),
         },
         "labels": {"system": "orbital-sigma", "severity": severity},
@@ -151,9 +154,7 @@ def alert_payload(alert: dict) -> dict:
                             "order": [
                                 {
                                     "key": {
-                                        "name": "__result"
-                                        if signal == "metrics"
-                                        else "count()"
+                                        "name": "__result" if signal == "metrics" else "count()"
                                     },
                                     "direction": "desc",
                                 }
@@ -255,9 +256,7 @@ async def main(inspect_tools: bool = False) -> None:
                         )
                     selected[tool.name] = details
                 selected["matching_tool_names"] = [
-                    tool.name
-                    for tool in tools
-                    if "alert" in tool.name or "dashboard" in tool.name
+                    tool.name for tool in tools if "alert" in tool.name or "dashboard" in tool.name
                 ]
                 print(json.dumps(selected, indent=2))
                 return

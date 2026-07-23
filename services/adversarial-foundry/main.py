@@ -2,15 +2,19 @@ from __future__ import annotations
 
 import random
 from collections import Counter
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from orbital_shared.api import create_service
+from orbital_shared.campaigns import stable_identifier, versioned_path
 from orbital_shared.database import ObjectStore
 from orbital_shared.models import ReplayMutation, sha256_digest
+from orbital_shared.object_storage import VersionedObjectStorage
 from pydantic import BaseModel
 
 app = create_service("ORBITAL Σ RANGE Adversarial Foundry", "orbital-adversarial-foundry")
 store = ObjectStore()
+objects = VersionedObjectStorage()
 
 OPERATORS: dict[str, list[str]] = {
     "retrieval": ["poison_policy", "stale_document", "conflict_documents", "cross_tenant_document"],
@@ -80,6 +84,18 @@ def generate(request: MutationRequest) -> dict[str, Any]:
         operator = rng.choice(OPERATORS[category])
         generation = index % 5
         mutation = ReplayMutation(
+            mutation_id=stable_identifier(
+                "mut",
+                {
+                    "capsule_id": capsule_id,
+                    "category": category,
+                    "operator": operator,
+                    "generation": generation,
+                    "seed": request.seed,
+                    "index": index,
+                },
+            ),
+            created_at=datetime(2026, 7, 23, tzinfo=UTC) + timedelta(seconds=index),
             source_capsule_id=capsule_id,
             category=category,
             operator=operator,
@@ -98,12 +114,25 @@ def generate(request: MutationRequest) -> dict[str, Any]:
             mutation.model_dump(mode="json"),
             mutation.created_at,
         )
+        path = versioned_path(
+            "mutation-artifacts",
+            mutation.mutation_id,
+            mutation.digest,
+            "mutation.json",
+        )
+        objects.put_json(
+            path,
+            "mutation_artifact",
+            mutation.mutation_id,
+            mutation.model_dump(mode="json"),
+        )
         mutations.append(mutation)
     return {
         "count": len(mutations),
         "catalogue_digest": sha256_digest([mutation.digest for mutation in mutations]),
         "categories": Counter(mutation.category for mutation in mutations),
         "mutation_ids": [mutation.mutation_id for mutation in mutations],
+        "storage_status": objects.health(),
     }
 
 

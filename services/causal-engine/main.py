@@ -7,12 +7,15 @@ from typing import Any
 import numpy as np
 from orbital_semconv import ATTRIBUTES, traced
 from orbital_shared.api import create_service
+from orbital_shared.campaigns import versioned_path
 from orbital_shared.database import ObjectStore
-from orbital_shared.models import CausalContribution, CausalFinding
+from orbital_shared.models import CausalContribution, CausalFinding, sha256_digest
+from orbital_shared.object_storage import VersionedObjectStorage
 from pydantic import BaseModel
 
 app = create_service("ORBITAL Σ FORK Causal Engine", "orbital-causal-engine")
 store = ObjectStore()
+objects = VersionedObjectStorage()
 
 FACTORS = [
     "prompt_compression",
@@ -158,7 +161,15 @@ def minimize(request: MinimizeRequest) -> dict[str, Any]:
         payload,
         __import__("datetime").datetime.now(__import__("datetime").UTC),
     )
-    return payload
+    digest = sha256_digest(payload)
+    object_path = versioned_path(
+        "minimized-regressions",
+        capsule_id,
+        digest,
+        "capsule.json",
+    )
+    objects.put_json(object_path, "minimized_regression", capsule_id, payload)
+    return payload | {"object_path": object_path, "checksum": digest}
 
 
 @app.get("/v1/causal/findings")

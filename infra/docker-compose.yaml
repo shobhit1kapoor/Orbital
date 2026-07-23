@@ -200,27 +200,84 @@ services:
     build: { context: .., dockerfile: infra/Dockerfile.service, args: { SERVICE: capsule-builder } }
     volumes: ["../missions:/workspace/missions"]
     ports: ["8005:8000"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      minio: { condition: service_healthy }
+      otel-collector: { condition: service_healthy }
 
   replay-orchestrator:
     <<: *python-service
     build: { context: .., dockerfile: infra/Dockerfile.service, args: { SERVICE: replay-orchestrator } }
     ports: ["8006:8000"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      minio: { condition: service_healthy }
+      otel-collector: { condition: service_healthy }
+
+  replay-worker:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.service
+      args: { SERVICE: replay-orchestrator }
+    env_file:
+      - path: ../.env
+        required: false
+    restart: unless-stopped
+    command:
+      [
+        "sh",
+        "-c",
+        "cd /workspace/services/replay-orchestrator && celery -A worker.app worker --loglevel=INFO --concurrency=${REPLAY_WORKER_CONCURRENCY:-4}",
+      ]
+    networks: [orbital]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      minio: { condition: service_healthy }
+      otel-collector: { condition: service_healthy }
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "cd /workspace/services/replay-orchestrator && celery -A worker.app inspect ping --destination celery@$$HOSTNAME --timeout 3 | grep -q pong",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
 
   adversarial-foundry:
     <<: *python-service
     build: { context: .., dockerfile: infra/Dockerfile.service, args: { SERVICE: adversarial-foundry } }
     ports: ["8007:8000"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      minio: { condition: service_healthy }
+      otel-collector: { condition: service_healthy }
 
   causal-engine:
     <<: *python-service
     build: { context: .., dockerfile: infra/Dockerfile.service, args: { SERVICE: causal-engine } }
     ports: ["8008:8000"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      minio: { condition: service_healthy }
+      otel-collector: { condition: service_healthy }
 
   certifier:
     <<: *python-service
     build: { context: .., dockerfile: infra/Dockerfile.service, args: { SERVICE: certifier } }
     volumes: ["../secrets:/workspace/secrets"]
     ports: ["8009:8000"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      minio: { condition: service_healthy }
+      otel-collector: { condition: service_healthy }
 
   watchtower:
     <<: *python-service

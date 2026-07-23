@@ -41,7 +41,7 @@ processors:
         type: string_attribute
         string_attribute:
           key: orbital.signal.class
-          values: [certificate, drift, rollback, causal, frontier]
+          values: [certificate, drift, rollback, causal, frontier, campaign]
       - name: medium-risk-sample
         type: and
         and:

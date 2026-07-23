@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 COMPOSE := docker compose --env-file .env -f infra/docker-compose.yaml
 
-.PHONY: bootstrap dev down seed certify hero-demo inject-drift verify verify-obi verify-alerts reset-demo test build signoz provision-signoz
+.PHONY: bootstrap dev down seed certify hero-demo inject-drift verify verify-obi verify-alerts campaign pause-campaign resume-campaign recover-campaign verify-campaign reset-demo test build signoz provision-signoz
 
 bootstrap:
 	bash ./demo/bootstrap.sh
@@ -66,6 +66,44 @@ verify-alerts:
 		trap 'docker unpause infra-obi-1 >/dev/null 2>&1 || true' EXIT; \
 		$(COMPOSE) --profile tools run --rm --no-deps demo-runner \
 			python /workspace/demo/verify_alerts.py
+
+campaign:
+	$(COMPOSE) up --build -d postgres redis minio otel-collector capsule-builder adversarial-foundry replay-orchestrator replay-worker
+	$(COMPOSE) restart otel-collector
+	$(COMPOSE) --profile tools build demo-runner
+	$(COMPOSE) --profile tools run --rm --no-deps demo-runner \
+		python /workspace/demo/phase3_campaign.py create
+
+pause-campaign:
+	$(COMPOSE) --profile tools run --rm --no-deps demo-runner \
+		python /workspace/demo/phase3_campaign.py pause
+
+resume-campaign:
+	$(COMPOSE) --profile tools run --rm --no-deps demo-runner \
+		python /workspace/demo/phase3_campaign.py resume
+
+recover-campaign:
+	$(COMPOSE) --profile tools run --rm --no-deps demo-runner \
+		python /workspace/demo/phase3_campaign.py recover
+
+verify-campaign:
+	$(MAKE) campaign
+	$(MAKE) pause-campaign
+	@sleep 4
+	$(COMPOSE) stop minio
+	$(COMPOSE) --profile tools run --rm --no-deps demo-runner \
+		python /workspace/demo/phase3_campaign.py storage-check
+	$(COMPOSE) start minio
+	$(COMPOSE) restart redis postgres replay-worker replay-orchestrator
+	$(COMPOSE) up -d --wait postgres redis minio replay-worker replay-orchestrator
+	$(MAKE) resume-campaign
+	@sleep 1
+	$(MAKE) pause-campaign
+	$(COMPOSE) restart replay-worker replay-orchestrator
+	$(COMPOSE) up -d --wait replay-worker replay-orchestrator
+	$(MAKE) recover-campaign
+	$(COMPOSE) --profile tools run --rm --no-deps demo-runner \
+		python /workspace/demo/verify_campaign.py
 
 reset-demo:
 	$(COMPOSE) down --remove-orphans

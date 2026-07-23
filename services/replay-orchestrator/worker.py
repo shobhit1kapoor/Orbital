@@ -1,0 +1,460 @@
+from __future__ import annotations
+
+import os
+import time
+from typing import Any
+
+from campaign_runtime import replay_outcome
+from celery import Celery, chord, group
+from celery.exceptions import MaxRetriesExceededError
+from opentelemetry import metrics, trace
+from opentelemetry.trace import (
+    NonRecordingSpan,
+    SpanContext,
+    TraceFlags,
+    set_span_in_context,
+)
+from orbital_semconv import configure_telemetry, current_trace_ids, emit_event, traced
+from orbital_shared.campaigns import (
+    CampaignRepository,
+    digest_suffix,
+    signoz_trace_url,
+    versioned_path,
+)
+from orbital_shared.database import CampaignRecord, CapsuleRecord, ReplayJobRecord
+from orbital_shared.models import sha256_digest, utcnow
+from orbital_shared.object_storage import IntegrityError, VersionedObjectStorage
+from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
+
+configure_telemetry("orbital-replay-worker")
+
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", REDIS_URL.rsplit("/", 1)[0] + "/1")
+app = Celery("orbital-replay", broker=REDIS_URL, backend=RESULT_BACKEND)
+app.conf.update(
+    task_acks_late=True,
+    task_reject_on_worker_lost=True,
+    worker_prefetch_multiplier=1,
+    task_track_started=True,
+    result_expires=86400,
+    broker_connection_retry_on_startup=True,
+    task_time_limit=int(os.getenv("REPLAY_TASK_TIME_LIMIT_SECONDS", "60")),
+    task_soft_time_limit=int(os.getenv("REPLAY_TASK_SOFT_LIMIT_SECONDS", "55")),
+)
+
+repository = CampaignRepository()
+objects = VersionedObjectStorage()
+meter = metrics.get_meter("orbital-replay-worker")
+worker_executions = meter.create_counter("orbital.replay.worker.executions")
+worker_retries = meter.create_counter("orbital.replay.worker.retries")
+replay_duration = meter.create_histogram("orbital.replay.duration", unit="ms")
+queue_delay = meter.create_histogram("orbital.replay.queue.delay", unit="ms")
+postgres_failures = meter.create_counter("orbital.postgresql.write.failures")
+worker_active = meter.create_up_down_counter("orbital.worker.active")
+
+
+def _trace_context(trace_id: str, job_id: str):
+    span_seed = int(digest_suffix(sha256_digest(["parent", job_id]))[:16], 16) or 1
+    context = SpanContext(
+        trace_id=int(trace_id, 16),
+        span_id=span_seed,
+        is_remote=True,
+        trace_flags=TraceFlags(TraceFlags.SAMPLED),
+    )
+    return set_span_in_context(NonRecordingSpan(context))
+
+
+def dispatch_campaign(campaign_id: str, job_ids: list[str]) -> str:
+    header = group(execute_replay_job.s(job_id) for job_id in job_ids)
+    result = chord(header)(complete_campaign.s(campaign_id))
+    emit_event(
+        "campaign.chord.dispatched",
+        campaign_id=campaign_id,
+        jobs=len(job_ids),
+        chord_id=result.id,
+    )
+    return str(result.id)
+
+
+def _defer_job(job_id: str, campaign_status: str) -> dict[str, Any]:
+    with Session(repository.engine) as session:
+        job = session.get(ReplayJobRecord, job_id)
+        if job and job.status != "COMPLETED":
+            job.status = "CANCELLED" if campaign_status == "CANCELLED" else "QUEUED"
+            job.updated_at = utcnow()
+            repository.add_event(
+                session,
+                job.campaign_id,
+                "job.deferred",
+                {
+                    "job_id": job_id,
+                    "reason": campaign_status,
+                    "status": job.status,
+                },
+            )
+            session.commit()
+    return {"job_id": job_id, "deferred": True, "reason": campaign_status}
+
+
+@app.task(
+    bind=True,
+    name="orbital.replay.execute",
+    max_retries=4,
+    default_retry_delay=1,
+    autoretry_for=(SQLAlchemyError,),
+    retry_backoff=True,
+    retry_jitter=False,
+)
+def execute_replay_job(self, job_id: str) -> dict[str, Any]:
+    started = time.perf_counter()
+    now = utcnow()
+    with Session(repository.engine) as session:
+        job = session.scalar(
+            select(ReplayJobRecord).where(ReplayJobRecord.job_id == job_id).with_for_update()
+        )
+        if not job:
+            return {"job_id": job_id, "status": "MISSING"}
+        campaign = session.get(CampaignRecord, job.campaign_id)
+        if not campaign:
+            return {"job_id": job_id, "status": "MISSING_CAMPAIGN"}
+        if job.status == "COMPLETED":
+            job.delivery_count += 1
+            job.updated_at = now
+            repository.add_event(
+                session,
+                campaign.campaign_id,
+                "job.duplicate_delivery",
+                {
+                    "job_id": job.job_id,
+                    "result_digest": job.result_digest,
+                    "idempotent": True,
+                },
+            )
+            session.commit()
+            return {
+                "job_id": job.job_id,
+                "status": "COMPLETED",
+                "result_digest": job.result_digest,
+                "idempotent_replay": True,
+            }
+        if campaign.status in {"PAUSED", "CANCELLED"}:
+            campaign_status = campaign.status
+            session.commit()
+            return _defer_job(job_id, campaign_status)
+        job.status = "RUNNING"
+        job.delivery_count += 1
+        job.started_at = now
+        job.updated_at = now
+        if campaign.status in {"CREATED", "QUEUED", "PARTIAL", "FAILED"}:
+            repository.transition(session, campaign, "RUNNING", "campaign.running")
+        queue_delay.record(
+            max(0.0, (now - (job.queued_at or job.created_at)).total_seconds() * 1000),
+            {"orbital.campaign.id": campaign.campaign_id},
+        )
+        session.commit()
+        campaign_payload = campaign.request_payload
+        trace_id = job.trace_id
+        campaign_id = campaign.campaign_id
+        capsule_id = job.capsule_id
+        mutation_id = job.mutation_id
+        mission_id = job.mission_id
+        replay_id = job.replay_id
+        candidate_id = job.candidate_id
+        attempt = job.delivery_count
+
+    worker_active.add(1)
+    worker_executions.add(1)
+    context = _trace_context(trace_id, job_id)
+    try:
+        with trace.get_tracer("orbital-replay-worker").start_as_current_span(
+            "replay.worker.execute",
+            context=context,
+            attributes={
+                "orbital.campaign.id": campaign_id,
+                "orbital.replay.job_id": job_id,
+                "orbital.replay.id": replay_id,
+                "orbital.mission.id": mission_id,
+                "orbital.candidate.id": candidate_id,
+                "orbital.mutation.id": mutation_id or "nominal",
+                "orbital.replay.attempt": attempt,
+                "orbital.signal.class": "campaign",
+            },
+        ) as span:
+            actual_trace_id, span_id = current_trace_ids()
+            with Session(repository.engine) as session:
+                capsule_record = session.get(CapsuleRecord, capsule_id)
+                if not capsule_record:
+                    raise IntegrityError(f"capsule metadata unavailable: {capsule_id}")
+            with traced(
+                "capsule.load",
+                {
+                    "orbital.capsule.id": capsule_id,
+                    "orbital.campaign.id": campaign_id,
+                },
+            ):
+                capsule_manifest = objects.get_json(
+                    capsule_record.object_path,
+                    capsule_record.checksum,
+                )
+            mutation = repository.object_store.get(mutation_id) if mutation_id else None
+            fail_once = job_id in campaign_payload.get("fail_once_job_ids", [])
+            failure_marker = f"retry-marker:{job_id}"
+            if fail_once and not repository.object_store.get(failure_marker):
+                repository.object_store.put(
+                    failure_marker,
+                    "replay_retry_marker",
+                    {"job_id": job_id, "attempt": attempt},
+                    utcnow(),
+                )
+                raise TimeoutError("deterministic first-delivery timeout")
+            delay_ms = int(campaign_payload.get("job_delay_ms", 0))
+            if delay_ms:
+                time.sleep(min(delay_ms, 5_000) / 1000)
+            with traced("replay.execute"):
+                run = replay_outcome(
+                    candidate_id=candidate_id,
+                    artifact_digest=campaign_payload["artifact_digest"],
+                    capsule_id=capsule_id,
+                    mutation_id=mutation_id,
+                    mutation=mutation,
+                    mode=campaign_payload["mode"],
+                    seed=campaign_payload["seed"],
+                    mission_id=mission_id,
+                    trace_id=actual_trace_id,
+                    span_id=span_id,
+                    replay_id=replay_id,
+                    authority_level=campaign_payload["authority_level"],
+                )
+            run.trace_url = signoz_trace_url(actual_trace_id)
+            result_payload = run.model_dump(mode="json")
+            result_payload["capsule_checksum"] = capsule_record.checksum
+            result_payload["capsule_digest"] = capsule_manifest["capsule_digest"]
+            result_digest = sha256_digest(result_payload)
+            branch_path = versioned_path(
+                "replay-branches",
+                replay_id,
+                result_digest,
+                "result.json",
+            )
+            with traced("replay.persist"):
+                objects.put_json(
+                    branch_path,
+                    "replay_branch",
+                    campaign_id,
+                    result_payload,
+                )
+                receipt_id = f"replay-effect:{job_id}"
+                repository.object_store.put(
+                    receipt_id,
+                    "replay_effect_receipt",
+                    {
+                        "receipt_id": receipt_id,
+                        "job_id": job_id,
+                        "effect": "deterministic_simulation_only",
+                        "result_digest": result_digest,
+                    },
+                    utcnow(),
+                )
+                repository.object_store.put(
+                    replay_id,
+                    "replay_run",
+                    result_payload,
+                    run.created_at,
+                )
+                with Session(repository.engine) as session:
+                    locked_job = session.scalar(
+                        select(ReplayJobRecord)
+                        .where(ReplayJobRecord.job_id == job_id)
+                        .with_for_update()
+                    )
+                    if locked_job.status == "COMPLETED":
+                        return {
+                            "job_id": job_id,
+                            "status": "COMPLETED",
+                            "result_digest": locked_job.result_digest,
+                            "idempotent_replay": True,
+                        }
+                    elapsed_ms = (time.perf_counter() - started) * 1000
+                    locked_job.status = "COMPLETED"
+                    locked_job.span_id = span_id
+                    locked_job.trace_id = actual_trace_id
+                    locked_job.completed_at = utcnow()
+                    locked_job.updated_at = locked_job.completed_at
+                    locked_job.duration_ms = elapsed_ms
+                    locked_job.result_digest = result_digest
+                    locked_job.result_payload = result_payload | {"object_path": branch_path}
+                    locked_job.error = None
+                    locked_job.signoz_trace_url = signoz_trace_url(actual_trace_id)
+                    campaign = session.get(CampaignRecord, campaign_id)
+                    counts = repository.refresh_counts(session, campaign)
+                    repository.add_event(
+                        session,
+                        campaign_id,
+                        "job.completed",
+                        {
+                            "job_id": job_id,
+                            "replay_id": replay_id,
+                            "trace_id": actual_trace_id,
+                            "result_digest": result_digest,
+                            "counts": counts.as_dict(),
+                        },
+                    )
+                    session.commit()
+            span.set_attribute("orbital.replay.result_digest", result_digest)
+            span.set_attribute("orbital.replay.success", run.success)
+            replay_duration.record(
+                (time.perf_counter() - started) * 1000,
+                {"orbital.campaign.id": campaign_id},
+            )
+            emit_event(
+                "replay.job.completed",
+                campaign_id=campaign_id,
+                job_id=job_id,
+                trace_id=actual_trace_id,
+                result_digest=result_digest,
+            )
+            return {
+                "job_id": job_id,
+                "status": "COMPLETED",
+                "result_digest": result_digest,
+                "trace_id": actual_trace_id,
+                "object_path": branch_path,
+            }
+    except (TimeoutError, IntegrityError) as exc:
+        worker_retries.add(1)
+        with traced(
+            "replay.retry",
+            {
+                "orbital.campaign.id": campaign_id,
+                "orbital.replay.job_id": job_id,
+                "exception.type": type(exc).__name__,
+                "orbital.signal.class": "campaign",
+            },
+        ):
+            pass
+        with Session(repository.engine) as session:
+            job = session.get(ReplayJobRecord, job_id)
+            if job and job.status != "COMPLETED":
+                job.status = "QUEUED"
+                job.retries += 1
+                job.error = str(exc)
+                job.updated_at = utcnow()
+                repository.add_event(
+                    session,
+                    campaign_id,
+                    "job.retry",
+                    {
+                        "job_id": job_id,
+                        "retry": job.retries,
+                        "reason": type(exc).__name__,
+                    },
+                )
+                session.commit()
+        try:
+            raise self.retry(exc=exc, countdown=1)
+        except MaxRetriesExceededError:
+            with Session(repository.engine) as session:
+                job = session.get(ReplayJobRecord, job_id)
+                job.status = "FAILED"
+                job.error = str(exc)
+                job.updated_at = utcnow()
+                session.commit()
+            return {"job_id": job_id, "status": "FAILED", "error": str(exc)}
+    except Exception as exc:
+        postgres_failures.add(1, {"exception.type": type(exc).__name__})
+        with traced(
+            "replay.worker.failure",
+            {
+                "orbital.campaign.id": campaign_id,
+                "orbital.replay.job_id": job_id,
+                "exception.type": type(exc).__name__,
+                "orbital.signal.class": "campaign",
+            },
+        ):
+            pass
+        emit_event(
+            "replay.job.failure",
+            campaign_id=campaign_id,
+            job_id=job_id,
+            error_type=type(exc).__name__,
+        )
+        raise
+    finally:
+        worker_active.add(-1)
+
+
+@app.task(name="orbital.replay.complete_campaign")
+def complete_campaign(results: list[dict[str, Any]], campaign_id: str) -> dict[str, Any]:
+    with traced(
+        "campaign.chord.complete",
+        {
+            "orbital.campaign.id": campaign_id,
+            "orbital.chord.result_count": len(results),
+            "orbital.signal.class": "campaign",
+        },
+    ):
+        with Session(repository.engine) as session:
+            campaign = session.scalar(
+                select(CampaignRecord)
+                .where(CampaignRecord.campaign_id == campaign_id)
+                .with_for_update()
+            )
+            if not campaign:
+                return {"campaign_id": campaign_id, "status": "MISSING"}
+            counts = repository.refresh_counts(session, campaign)
+            if campaign.status == "CANCELLED":
+                target = "CANCELLED"
+            elif campaign.status == "PAUSED":
+                target = "PAUSED"
+            elif counts.completed == counts.total and counts.total > 0:
+                target = "COMPLETED"
+            else:
+                target = "PARTIAL"
+            summary = {
+                "counts": counts.as_dict(),
+                "successful": sum(
+                    bool((item or {}).get("status") == "COMPLETED") for item in results
+                ),
+                "chord_results": len(results),
+            }
+            campaign.result_summary = summary
+            if target != campaign.status:
+                repository.transition(
+                    session,
+                    campaign,
+                    target,
+                    "campaign.chord.completed",
+                    summary,
+                )
+            else:
+                repository.add_event(
+                    session,
+                    campaign_id,
+                    "campaign.chord.completed",
+                    {"status": target, **summary},
+                )
+            export = repository.campaign_payload(session, campaign)
+            session.commit()
+        export_digest = sha256_digest(export)
+        export_path = versioned_path(
+            "campaign-exports",
+            campaign_id,
+            export_digest,
+            "campaign.json",
+        )
+        objects.put_json(export_path, "campaign_export", campaign_id, export)
+        with Session(repository.engine) as session:
+            campaign = session.get(CampaignRecord, campaign_id)
+            campaign.result_summary = (campaign.result_summary or {}) | {
+                "export_path": export_path,
+                "export_digest": export_digest,
+            }
+            session.commit()
+        return {
+            "campaign_id": campaign_id,
+            "status": target,
+            "counts": counts.as_dict(),
+            "export_path": export_path,
+        }

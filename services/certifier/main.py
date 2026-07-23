@@ -10,6 +10,7 @@ from nacl.exceptions import BadSignatureError
 from nacl.signing import SigningKey
 from orbital_semconv import ATTRIBUTES, SPANS, traced
 from orbital_shared.api import create_service
+from orbital_shared.campaigns import versioned_path
 from orbital_shared.database import ObjectStore
 from orbital_shared.models import (
     ArtifactIdentity,
@@ -20,12 +21,15 @@ from orbital_shared.models import (
     SafetyCaseNode,
     Verdict,
     canonical_json,
+    sha256_digest,
 )
+from orbital_shared.object_storage import VersionedObjectStorage
 from orbital_shared.stats import wilson_interval, zero_failure_upper_bound
 from pydantic import BaseModel
 
 app = create_service("ORBITAL Σ CLEARANCE Certifier", "orbital-certifier")
 store = ObjectStore()
+objects = VersionedObjectStorage()
 
 
 def _enum_value(value: Any) -> str:
@@ -231,6 +235,23 @@ def issue_certificate(request: CertificationRequest) -> dict[str, Any]:
         certificate.model_dump(mode="json"),
         certificate.created_at,
     )
+    bundle = {
+        "certificate": certificate.model_dump(mode="json"),
+        "public_key": base64.b64encode(bytes(signing_key.verify_key)).decode(),
+    }
+    bundle_digest = sha256_digest(bundle)
+    bundle_path = versioned_path(
+        "signed-certificate-bundles",
+        certificate.certificate_id,
+        bundle_digest,
+        "certificate.json",
+    )
+    objects.put_json(
+        bundle_path,
+        "signed_certificate_bundle",
+        certificate.certificate_id,
+        bundle,
+    )
     with traced(
         SPANS["certificate"],
         {
@@ -250,8 +271,9 @@ def issue_certificate(request: CertificationRequest) -> dict[str, Any]:
     ):
         pass
     return {
-        "certificate": certificate.model_dump(mode="json"),
-        "public_key": base64.b64encode(bytes(signing_key.verify_key)).decode(),
+        **bundle,
+        "bundle_path": bundle_path,
+        "bundle_checksum": bundle_digest,
     }
 
 

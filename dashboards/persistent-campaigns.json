@@ -1,0 +1,26 @@
+{
+  "title": "ORBITAL Σ — Persistent Campaigns",
+  "description": "Durable replay campaign execution, recovery, PostgreSQL, Redis/Celery, and MinIO evidence.",
+  "tags": ["orbital", "campaigns", "celery", "minio", "postgresql"],
+  "variables": {"campaign_id": {"type": "text", "defaultValue": ""}},
+  "layout": [
+    {"i": "campaign-queue-depth", "x": 0, "y": 0, "w": 3, "h": 3},
+    {"i": "campaign-completion", "x": 3, "y": 0, "w": 3, "h": 3},
+    {"i": "worker-utilization", "x": 6, "y": 0, "w": 3, "h": 3},
+    {"i": "retry-rate", "x": 9, "y": 0, "w": 3, "h": 3},
+    {"i": "replay-duration", "x": 0, "y": 3, "w": 6, "h": 4},
+    {"i": "failed-jobs", "x": 6, "y": 3, "w": 6, "h": 4},
+    {"i": "minio-latency", "x": 0, "y": 7, "w": 6, "h": 4},
+    {"i": "postgres-write-failures", "x": 6, "y": 7, "w": 6, "h": 4}
+  ],
+  "widgets": [
+    {"id": "campaign-queue-depth", "title": "Queue depth", "panelTypes": "value", "query": {}},
+    {"id": "campaign-completion", "title": "Campaign completion", "panelTypes": "value", "query": {}},
+    {"id": "worker-utilization", "title": "Worker utilization", "panelTypes": "value", "query": {}},
+    {"id": "retry-rate", "title": "Retry rate", "panelTypes": "value", "query": {}},
+    {"id": "replay-duration", "title": "Replay duration p95", "panelTypes": "graph", "query": {}},
+    {"id": "failed-jobs", "title": "Failed replay jobs", "panelTypes": "table", "query": {}},
+    {"id": "minio-latency", "title": "MinIO persistence latency", "panelTypes": "graph", "query": {}},
+    {"id": "postgres-write-failures", "title": "PostgreSQL write failures", "panelTypes": "graph", "query": {}}
+  ]
+}
