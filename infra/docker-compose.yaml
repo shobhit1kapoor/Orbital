@@ -225,6 +225,8 @@ services:
   watchtower:
     <<: *python-service
     build: { context: .., dockerfile: infra/Dockerfile.service, args: { SERVICE: watchtower } }
+    environment:
+      SIGNOZ_PUBLIC_URL: http://localhost:8080
     ports: ["8010:8000"]
     networks: [orbital, signoz]
 
@@ -237,6 +239,7 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
       WATCHTOWER_URL: http://watchtower:8000
       ORBITAL_WEBHOOK_SECRET: ${ORBITAL_WEBHOOK_SECRET:-development-only}
+      SIGNOZ_PUBLIC_URL: http://localhost:8080
     depends_on:
       watchtower: { condition: service_healthy }
       otel-collector: { condition: service_healthy }
@@ -290,6 +293,10 @@ services:
       CERTIFIER_URL: http://certifier:8000
       WATCHTOWER_URL: http://watchtower:8000
       WATCHTOWER_RELAY_URL: http://watchtower-relay:8000
+      SIGNOZ_MCP_URL: http://signoz-mcp:8000/mcp
+      SIGNOZ_CLICKHOUSE_URL: http://orbital-telemetrystore-clickhouse-0-0:8123
+      SIGNOZ_PUBLIC_URL: http://localhost:8080
+      ORBITAL_WEBHOOK_SECRET: ${ORBITAL_WEBHOOK_SECRET:-development-only}
       MOCK_MCP_URL: http://mock-mcp-tool:8000
       MOCK_REFUND_URL: http://mock-refund-service:8000
       ORBITAL_DEMO_OUTPUT: /workspace/data/demo-output

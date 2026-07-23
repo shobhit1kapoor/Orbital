@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 COMPOSE := docker compose --env-file .env -f infra/docker-compose.yaml
 
-.PHONY: bootstrap dev down seed certify hero-demo inject-drift verify verify-obi reset-demo test build signoz provision-signoz
+.PHONY: bootstrap dev down seed certify hero-demo inject-drift verify verify-obi verify-alerts reset-demo test build signoz provision-signoz
 
 bootstrap:
 	bash ./demo/bootstrap.sh
@@ -53,6 +53,19 @@ verify-obi:
 	@sleep 20
 	$(COMPOSE) --profile tools build demo-runner
 	$(COMPOSE) --profile tools run --rm --no-deps demo-runner python /workspace/demo/verify_obi.py
+
+verify-alerts:
+	@test "$$(uname -s)" = "Linux" || (echo "Live SigNoz alert verification requires Linux"; exit 1)
+	$(COMPOSE) --profile tools build control-plane watchtower watchtower-relay demo-runner
+	$(COMPOSE) up -d control-plane watchtower watchtower-relay signoz-mcp
+	$(MAKE) provision-signoz
+	@set -euo pipefail; \
+		$(COMPOSE) --profile obi up -d --force-recreate obi; \
+		sleep 20; \
+		docker pause infra-obi-1 >/dev/null; \
+		trap 'docker unpause infra-obi-1 >/dev/null 2>&1 || true' EXIT; \
+		$(COMPOSE) --profile tools run --rm --no-deps demo-runner \
+			python /workspace/demo/verify_alerts.py
 
 reset-demo:
 	$(COMPOSE) down --remove-orphans

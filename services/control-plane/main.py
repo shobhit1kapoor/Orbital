@@ -12,9 +12,10 @@ import yaml
 from fastapi import HTTPException
 from orbital_contract import compile_contract
 from orbital_shared.api import create_service
-from orbital_shared.database import ObjectStore
+from orbital_shared.database import ObjectStore, RolloutState
 from orbital_shared.models import ArtifactIdentity, utcnow
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 from sse_starlette.sse import EventSourceResponse
 
 app = create_service("ORBITAL Σ Control Plane", "orbital-control-plane")
@@ -162,6 +163,23 @@ async def rollout(body: RolloutBody) -> dict[str, Any]:
         raise HTTPException(422, "percentage must be between 0 and 100")
     payload = body.model_dump() | {"updated_at": utcnow().isoformat()}
     store.put("active-rollout", "rollout", payload, utcnow())
+    with Session(store.engine) as session:
+        state = session.get(RolloutState, "orbital.candidate.enabled")
+        if state is None:
+            state = RolloutState(
+                flag="orbital.candidate.enabled",
+                candidate_id=body.candidate_id,
+                enabled=body.percentage > 0,
+                percentage=body.percentage,
+                certificate_id=body.certificate_id,
+            )
+            session.add(state)
+        else:
+            state.candidate_id = body.candidate_id
+            state.enabled = body.percentage > 0
+            state.percentage = body.percentage
+            state.certificate_id = body.certificate_id
+        session.commit()
     return payload
 
 

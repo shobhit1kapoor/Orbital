@@ -74,20 +74,60 @@ def alert_payload(alert: dict) -> dict:
     original_filter = alert.get("filter", "")
     if "trace_matching" in alert:
         original_filter = "name = 'action.commit'"
-    if alert.get("signal") == "metrics":
-        original_filter = f"name = '{alert.get('metric', 'orbital.signal')}'"
+    signal = alert.get("signal", "traces")
+    group_by = [
+        (
+            {"name": "trace_id", "fieldContext": "tag", "fieldDataType": "string"}
+            if signal == "metrics"
+            else {"name": "trace_id"}
+        ),
+        {
+            "name": "orbital.certificate.id",
+            "fieldContext": "tag",
+            "fieldDataType": "string",
+        },
+        {
+            "name": "orbital.candidate.id",
+            "fieldContext": "tag",
+            "fieldDataType": "string",
+        },
+        {
+            "name": "orbital.baseline.candidate.id",
+            "fieldContext": "tag",
+            "fieldDataType": "string",
+        },
+    ]
+    if signal == "metrics":
+        aggregation = {
+            "metricName": alert["metric"],
+            "timeAggregation": "latest",
+            "spaceAggregation": "min"
+            if alert.get("operator") == "below"
+            else "max",
+        }
+    else:
+        aggregation = {"expression": "count()"}
     return {
         "alert": alert["name"],
-        "alertType": "TRACES_BASED_ALERT",
+        "alertType": "METRIC_BASED_ALERT" if signal == "metrics" else "TRACES_BASED_ALERT",
         "ruleType": "threshold_rule",
         "description": f"ORBITAL defensive local alert ({alert.get('signal', 'traces')}).",
         "annotations": {
             "summary": alert["name"],
-            "description": "Observed {{$value}} matching local ORBITAL signals.",
+            "description": (
+                "Observed {{$value}} matching local ORBITAL signals; "
+                "trace {{$labels.trace_id}}."
+            ),
         },
         "labels": {"system": "orbital-sigma", "severity": severity},
-        "frequency": "1m",
-        "evalWindow": "5m",
+        "evaluation": {
+            "kind": "rolling",
+            "spec": {"frequency": "1m", "evalWindow": "5m"},
+        },
+        "notificationSettings": {
+            "usePolicy": False,
+            "renotify": {"enabled": False},
+        },
         "condition": {
             "compositeQuery": {
                 "queryType": "builder",
@@ -97,13 +137,23 @@ def alert_payload(alert: dict) -> dict:
                         "type": "builder_query",
                         "spec": {
                             "name": "A",
-                            "signal": "traces",
+                            "signal": signal,
                             "disabled": False,
-                            "aggregations": [{"expression": "count()"}],
+                            "aggregations": [aggregation],
                             "filter": {"expression": original_filter},
-                            "groupBy": [],
-                            "order": [{"key": {"name": "count()"}, "direction": "desc"}],
+                            "groupBy": group_by,
+                            "order": [
+                                {
+                                    "key": {
+                                        "name": "__result"
+                                        if signal == "metrics"
+                                        else "count()"
+                                    },
+                                    "direction": "desc",
+                                }
+                            ],
                             "limit": 100,
+                            **({"stepInterval": 60} if signal == "metrics" else {}),
                         },
                     }
                 ],
@@ -114,8 +164,8 @@ def alert_payload(alert: dict) -> dict:
                 "spec": [
                     {
                         "name": "critical" if severity == "critical" else "warning",
-                        "target": 0,
-                        "op": "above",
+                        "target": alert.get("threshold", 0),
+                        "op": alert.get("operator", "above"),
                         "matchType": "at_least_once",
                         "channels": [NOTIFICATION_CHANNEL],
                     }
@@ -131,6 +181,14 @@ def result_error(result: object) -> str | None:
     if getattr(result, "isError", False) or "validation error" in lowered or "error:" in lowered:
         return content
     return None
+
+
+def result_json(result: object) -> dict:
+    for item in getattr(result, "content", []):
+        text = getattr(item, "text", None)
+        if text:
+            return json.loads(text)
+    return {}
 
 
 async def main(inspect_tools: bool = False) -> None:
@@ -150,6 +208,9 @@ async def main(inspect_tools: bool = False) -> None:
                         "signoz_create_notification_channel",
                         "signoz_list_alerts",
                         "signoz_list_alert_rules",
+                        "signoz_get_alert",
+                        "signoz_get_alert_history",
+                        "signoz_update_alert",
                         "signoz_list_dashboards",
                     }:
                         continue
@@ -159,6 +220,9 @@ async def main(inspect_tools: bool = False) -> None:
                         "signoz_create_notification_channel",
                         "signoz_list_alerts",
                         "signoz_list_alert_rules",
+                        "signoz_get_alert",
+                        "signoz_get_alert_history",
+                        "signoz_update_alert",
                         "signoz_list_dashboards",
                     }:
                         details["properties"] = schema.get("properties", {})
@@ -241,29 +305,44 @@ async def main(inspect_tools: bool = False) -> None:
                 except Exception as exc:
                     output["errors"].append({"path": str(path), "error": str(exc)})
             alert_manifest = yaml.safe_load(Path("alerts/alerts.yaml").read_text(encoding="utf-8"))
-            alert_listing = ""
+            alert_rules: dict[str, dict] = {}
             if "signoz_list_alert_rules" in available:
-                alert_listing = str(
-                    (
-                        await session.call_tool(
-                            "signoz_list_alert_rules", {"limit": 1000, "offset": 0}
-                        )
-                    ).content
+                listing = await session.call_tool(
+                    "signoz_list_alert_rules", {"limit": 1000, "offset": 0}
                 )
+                alert_rules = {
+                    item["alert"]: item
+                    for item in result_json(listing).get("data", [])
+                    if item.get("alert")
+                }
             for alert in alert_manifest["alerts"]:
-                if alert["name"] in alert_listing:
-                    output["alerts"].append(
-                        {"name": alert["name"], "result": "already provisioned"}
-                    )
-                    continue
                 try:
-                    result = await session.call_tool("signoz_create_alert", alert_payload(alert))
+                    payload = alert_payload(alert)
+                    existing = alert_rules.get(alert["name"])
+                    if existing and "signoz_update_alert" in available:
+                        result = await session.call_tool(
+                            "signoz_update_alert",
+                            payload | {"id": existing["ruleId"]},
+                        )
+                        action = "updated"
+                    elif existing:
+                        output["alerts"].append(
+                            {"name": alert["name"], "result": "already provisioned"}
+                        )
+                        continue
+                    else:
+                        result = await session.call_tool("signoz_create_alert", payload)
+                        action = "created"
                     error = result_error(result)
                     if error:
                         output["errors"].append({"name": alert["name"], "error": error})
                     else:
                         output["alerts"].append(
-                            {"name": alert["name"], "result": str(result.content)}
+                            {
+                                "name": alert["name"],
+                                "action": action,
+                                "result": str(result.content),
+                            }
                         )
                 except Exception as exc:
                     output["errors"].append({"name": alert["name"], "error": str(exc)})

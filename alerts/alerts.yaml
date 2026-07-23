@@ -23,14 +23,20 @@ alerts:
     severity: warning
     signal: metrics
     metric: orbital.certificate.seconds_remaining
+    operator: below
+    threshold: 3600
   - name: ORBITAL Canary Regression
     severity: critical
     signal: metrics
     metric: orbital.canary.quality_delta
+    operator: below
+    threshold: 0
   - name: ORBITAL Replay Fidelity Degradation
     severity: warning
     signal: metrics
     metric: orbital.replay.fidelity
+    operator: below
+    threshold: 0.9
   - name: ORBITAL Policy Bundle Mismatch
     severity: critical
     signal: traces
@@ -39,11 +45,17 @@ alerts:
     severity: warning
     signal: metrics
     metric: orbital.causal.fragility
+    operator: above
+    threshold: 0.8
   - name: ORBITAL OBI Sensor Loss
     severity: critical
     signal: metrics
     metric: orbital.sensor.obi.healthy
+    operator: below
+    threshold: 1
   - name: ORBITAL Telemetry Cardinality Explosion
     severity: warning
     signal: metrics
     metric: orbital.telemetry.cardinality
+    operator: above
+    threshold: 10000
