@@ -67,6 +67,15 @@ mutation_generation_latency = meter.create_histogram(
     unit="ms",
     description="Deterministic mutation generation and persistence duration",
 )
+range_mutations_scored = meter.create_counter(
+    "orbital.range.safety_mutations.scored"
+)
+range_test_cases_selected = meter.create_counter(
+    "orbital.range.test_cases.selected"
+)
+range_search_budget = meter.create_histogram(
+    "orbital.range.search.budget", unit="{branch}"
+)
 
 OPERATORS: dict[str, list[str]] = {}
 for _spec in operator_catalog():
@@ -519,6 +528,9 @@ def adapt(request: AdaptiveRequest) -> dict[str, Any]:
             request.generations, request.force_deterministic_fallback
         )
         search_budget = len(selected) * request.beam_width * request.generations
+        range_mutations_scored.add(len(scores))
+        range_test_cases_selected.add(len(selected))
+        range_search_budget.record(search_budget)
         submission = {
             "catalogue_digest": catalogue_digest,
             "selection_digest": selected_digest,
@@ -532,16 +544,83 @@ def adapt(request: AdaptiveRequest) -> dict[str, Any]:
         }
         submission_digest = sha256_digest(submission)
         campaign_id = stable_identifier("range", submission_digest)
+        selection_payload = {
+            "schema_version": "orbital.range.selection/v1",
+            "campaign_id": campaign_id,
+            "catalogue_digest": catalogue_digest,
+            "selection_digest": selected_digest,
+            "scoring_version": SCORING_VERSION,
+            "selected": [
+                {
+                    "rank": rank,
+                    **item.model_dump(mode="json"),
+                }
+                for rank, item in enumerate(selected, start=1)
+            ],
+            "execution_mode": "deterministic_simulation",
+        }
+        selection_path = versioned_path(
+            "range-selections",
+            campaign_id,
+            selected_digest,
+            "selection.json",
+        )
+        selection_object = objects.put_json(
+            selection_path,
+            "range_selection",
+            campaign_id,
+            selection_payload,
+        )
         now = utcnow()
         with Session(store.engine) as session:
             existing = session.get(RangeCampaignRecord, campaign_id)
             if existing:
+                existing.result_summary = (existing.result_summary or {}) | {
+                    "selection_object_path": selection_path,
+                    "selection_object_checksum": selection_object["checksum"],
+                }
+                pending_ids = list(
+                    session.scalars(
+                        select(AdaptiveBranchRecord.branch_id)
+                        .where(
+                            AdaptiveBranchRecord.campaign_id == campaign_id,
+                            AdaptiveBranchRecord.status != "COMPLETED",
+                        )
+                        .order_by(
+                            AdaptiveBranchRecord.generation,
+                            AdaptiveBranchRecord.beam_index,
+                        )
+                    ).all()
+                )
+                recovered_chord_id: str | None = None
+                if pending_ids:
+                    existing.status = "QUEUED"
+                session.commit()
+                if pending_ids:
+                    client = _celery()
+                    header = group(
+                        client.signature(
+                            "orbital.range.execute_branch",
+                            args=[branch_id],
+                            immutable=True,
+                        )
+                        for branch_id in pending_ids
+                    )
+                    callback = client.signature(
+                        "orbital.range.complete_campaign",
+                        args=[campaign_id],
+                        immutable=True,
+                    )
+                    recovered_chord_id = str(chord(header)(callback).id)
                 return {
                     "campaign_id": existing.campaign_id,
                     "status": existing.status,
                     "duplicate_submission": True,
+                    "recovery_dispatched": bool(pending_ids),
+                    "recovered_branches": len(pending_ids),
                     "catalogue_digest": existing.catalogue_digest,
                     "selection_digest": existing.selection_digest,
+                    "selection_object_path": selection_path,
                     "selected_count": existing.selected_count,
                     "search": {
                         "beam_width": existing.beam_width,
@@ -549,6 +628,7 @@ def adapt(request: AdaptiveRequest) -> dict[str, Any]:
                         "budget": existing.search_budget,
                         "budget_used": existing.budget_used,
                         "proposal_source": existing.proposal_source,
+                        "celery_chord_id": recovered_chord_id,
                     },
                     "trace_id": trace_id,
                 }
@@ -568,11 +648,17 @@ def adapt(request: AdaptiveRequest) -> dict[str, Any]:
                     result_summary={
                         "fallback_reason": fallback_reason,
                         "selection_trace_id": trace_id,
+                        "selection_object_path": selection_path,
+                        "selection_object_checksum": selection_object["checksum"],
                         "submission": submission,
                     },
                     created_at=now,
                 )
             )
+            # Explicitly establish the parent row before bulk-inserting 2,160
+            # score and branch rows. These models intentionally avoid ORM
+            # relationships, so SQLAlchemy cannot infer flush ordering.
+            session.flush()
             selected_ids = {item.mutation_id for item in selected}
             ranks = {
                 item.mutation_id: rank
@@ -655,6 +741,15 @@ def adapt(request: AdaptiveRequest) -> dict[str, Any]:
         )
         async_result = chord(group(chains))(callback)
         emit_event(
+            "range.selection.completed",
+            campaign_id=campaign_id,
+            scored_count=len(scores),
+            selected_count=len(selected),
+            selection_digest=selected_digest,
+            selection_object_path=selection_path,
+            trace_id=trace_id,
+        )
+        emit_event(
             "range.adaptive.dispatched",
             campaign_id=campaign_id,
             selected_count=len(selected),
@@ -668,6 +763,7 @@ def adapt(request: AdaptiveRequest) -> dict[str, Any]:
         "duplicate_submission": False,
         "catalogue_digest": catalogue_digest,
         "selection_digest": selected_digest,
+        "selection_object_path": selection_path,
         "selected_count": len(selected),
         "selected": [
             {
@@ -735,3 +831,25 @@ def adaptive_status(campaign_id: str) -> dict[str, Any]:
             },
             "result_summary": campaign.result_summary,
         }
+
+
+@app.post(
+    "/v1/attacks/adapt/{campaign_id}/branches/{branch_id}/redeliver",
+    status_code=202,
+)
+def redeliver_adaptive_branch(
+    campaign_id: str, branch_id: str
+) -> dict[str, Any]:
+    with Session(store.engine) as session:
+        branch = session.get(AdaptiveBranchRecord, branch_id)
+        if not branch or branch.campaign_id != campaign_id:
+            raise HTTPException(404, "adaptive test-case branch not found")
+        original_digest = branch.result_digest
+    task = _celery().send_task("orbital.range.execute_branch", args=[branch_id])
+    return {
+        "campaign_id": campaign_id,
+        "branch_id": branch_id,
+        "task_id": str(task.id),
+        "original_result_digest": original_digest,
+        "expected_idempotent": original_digest is not None,
+    }

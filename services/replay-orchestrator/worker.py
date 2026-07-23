@@ -7,6 +7,7 @@ from typing import Any
 from campaign_runtime import replay_outcome
 from celery import Celery, chord, group
 from celery.exceptions import MaxRetriesExceededError
+from celery.signals import worker_process_init
 from opentelemetry import metrics, trace
 from opentelemetry.trace import (
     NonRecordingSpan,
@@ -21,18 +22,24 @@ from orbital_shared.campaigns import (
     signoz_trace_url,
     versioned_path,
 )
-from orbital_shared.database import CampaignRecord, CapsuleRecord, ReplayJobRecord
 from orbital_shared.database import (
     AdaptiveBranchRecord,
+    CampaignRecord,
+    CapsuleRecord,
     MetamorphicCaseRecord,
     MutationRecord,
     RangeCampaignRecord,
     RangeScoreRecord,
+    ReplayJobRecord,
 )
 from orbital_shared.metamorphic import evaluate_invariant
 from orbital_shared.models import ReplayMutation, sha256_digest, utcnow
 from orbital_shared.object_storage import IntegrityError, VersionedObjectStorage
-from orbital_shared.range_evaluation import AdaptiveProposal, evaluate_branch, score_mutation
+from orbital_shared.range_evaluation import (
+    AdaptiveProposal,
+    evaluate_branch,
+    score_mutation,
+)
 from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -66,6 +73,14 @@ range_branches = meter.create_counter("orbital.range.adaptive.branches")
 range_duration = meter.create_histogram("orbital.range.adaptive.duration", unit="ms")
 metamorphic_evaluations = meter.create_counter("orbital.metamorphic.evaluations")
 metamorphic_failures = meter.create_counter("orbital.metamorphic.failures")
+
+
+@worker_process_init.connect
+def reset_inherited_database_connections(**_: Any) -> None:
+    # Celery's prefork workers must never share psycopg connections or prepared
+    # statement state inherited from the parent process.
+    repository.engine.dispose(close=False)
+    objects.database.engine.dispose(close=False)
 
 
 def _trace_context(trace_id: str, job_id: str):
@@ -490,10 +505,12 @@ def complete_campaign(results: list[dict[str, Any]], campaign_id: str) -> dict[s
     name="orbital.range.execute_branch",
     max_retries=3,
     default_retry_delay=1,
+    autoretry_for=(SQLAlchemyError, IntegrityError),
+    retry_backoff=True,
+    retry_jitter=False,
 )
 def execute_range_branch(self, branch_id: str) -> dict[str, Any]:
     started = time.perf_counter()
-    now = utcnow()
     with Session(repository.engine) as session:
         branch = session.scalar(
             select(AdaptiveBranchRecord)
@@ -664,6 +681,7 @@ def complete_range_campaign(campaign_id: str) -> dict[str, Any]:
                 ),
             }
             campaign.result_summary = (campaign.result_summary or {}) | summary
+            status = campaign.status
             session.commit()
         digest = sha256_digest(summary)
         path = versioned_path(
@@ -672,7 +690,7 @@ def complete_range_campaign(campaign_id: str) -> dict[str, Any]:
         objects.put_json(path, "range_campaign_export", campaign_id, summary)
         return {
             "campaign_id": campaign_id,
-            "status": campaign.status,
+            "status": status,
             **summary,
             "object_path": path,
         }
@@ -683,6 +701,9 @@ def complete_range_campaign(campaign_id: str) -> dict[str, Any]:
     name="orbital.metamorphic.evaluate_case",
     max_retries=3,
     default_retry_delay=1,
+    autoretry_for=(SQLAlchemyError, IntegrityError),
+    retry_backoff=True,
+    retry_jitter=False,
 )
 def execute_metamorphic_case(self, case_id: str) -> dict[str, Any]:
     with Session(repository.engine) as session:
@@ -779,8 +800,9 @@ def complete_metamorphic_suite(
         "failed": len(results) - passed,
         "complete": all(item.get("status") == "COMPLETED" for item in results),
     }
+    current = repository.object_store.get(suite_id) or {}
     repository.object_store.put(
-        suite_id, "metamorphic_suite", payload, utcnow()
+        suite_id, "metamorphic_suite", current | payload, utcnow()
     )
     emit_event("metamorphic.suite.completed", **payload)
     return payload

@@ -9,7 +9,7 @@ from typing import Any
 from campaign_runtime import replay_outcome
 from fastapi import Header, HTTPException, Query, Request
 from opentelemetry import metrics
-from orbital_semconv import emit_event, traced
+from orbital_semconv import current_trace_ids, emit_event, traced
 from orbital_shared.api import create_service
 from orbital_shared.campaigns import (
     TERMINAL_STATES,
@@ -596,6 +596,161 @@ async def stream_campaign(
 @app.get("/v1/campaigns/stats")
 def campaign_stats() -> dict[str, Any]:
     return repository.object_counts() | {"storage_status": objects.health()}
+
+
+@app.post("/v1/metamorphic/suites", status_code=202)
+def create_metamorphic_suite(request: MetamorphicSuiteRequest) -> dict[str, Any]:
+    with Session(repository.engine) as session:
+        if request.capsule_ids:
+            capsule_ids = list(dict.fromkeys(request.capsule_ids))
+            known = set(
+                session.scalars(
+                    select(CapsuleRecord.capsule_id).where(
+                        CapsuleRecord.capsule_id.in_(capsule_ids)
+                    )
+                ).all()
+            )
+            missing = sorted(set(capsule_ids) - known)
+            if missing:
+                raise HTTPException(422, f"capsules are not persisted: {missing[:5]}")
+        else:
+            capsule_ids = list(
+                session.scalars(
+                    select(CapsuleRecord.capsule_id)
+                    .order_by(CapsuleRecord.capsule_id)
+                    .limit(len(INVARIANTS))
+                ).all()
+            )
+    if not capsule_ids:
+        raise HTTPException(409, "the Phase 4A capsule corpus is unavailable")
+    suite_identity = {
+        "submission_key": request.submission_key,
+        "capsule_ids": capsule_ids,
+        "invariants": list(INVARIANTS),
+        "version": "phase4b.metamorphic.v1",
+    }
+    suite_id = stable_identifier("metasuite", suite_identity)
+    existing = store.get(suite_id)
+    if existing:
+        return existing | {"duplicate_submission": True}
+
+    now = utcnow()
+    case_ids: list[str] = []
+    with traced(
+        "metamorphic.suite.create",
+        {
+            "orbital.metamorphic.suite.id": suite_id,
+            "orbital.metamorphic.case_count": len(INVARIANTS),
+            "orbital.signal.class": "campaign",
+            "orbital.execution.mode": "deterministic_simulation",
+        },
+    ):
+        trace_id, _ = current_trace_ids()
+        with Session(repository.engine) as session:
+            for index, invariant in enumerate(INVARIANTS):
+                capsule_id = capsule_ids[index % len(capsule_ids)]
+                case_id = stable_identifier(
+                    "metacase", [suite_id, invariant, capsule_id]
+                )
+                case_ids.append(case_id)
+                if not session.get(MetamorphicCaseRecord, case_id):
+                    session.add(
+                        MetamorphicCaseRecord(
+                            case_id=case_id,
+                            suite_id=suite_id,
+                            invariant=invariant,
+                            capsule_id=capsule_id,
+                            trace_id=deterministic_trace_id(case_id),
+                            status="QUEUED",
+                            delivery_count=0,
+                            retries=0,
+                            input_payload={
+                                "fixture": default_fixture(capsule_id),
+                                "execution_mode": "deterministic_simulation",
+                            },
+                            created_at=now,
+                        )
+                    )
+            session.commit()
+        payload = {
+            "suite_id": suite_id,
+            "status": "QUEUED",
+            "case_count": len(case_ids),
+            "case_ids": case_ids,
+            "invariants": list(INVARIANTS),
+            "trace_id": trace_id,
+            "execution_mode": "deterministic_simulation",
+            "duplicate_submission": False,
+        }
+        store.put(suite_id, "metamorphic_suite", payload, now)
+        chord_id = dispatch_metamorphic_suite(suite_id, case_ids)
+        response = payload | {"chord_id": chord_id}
+        emit_event("metamorphic.suite.created", **response)
+        return response
+
+
+@app.get("/v1/metamorphic/suites/{suite_id}")
+def metamorphic_suite(suite_id: str) -> dict[str, Any]:
+    summary = store.get(suite_id)
+    with Session(repository.engine) as session:
+        cases = list(
+            session.scalars(
+                select(MetamorphicCaseRecord)
+                .where(MetamorphicCaseRecord.suite_id == suite_id)
+                .order_by(MetamorphicCaseRecord.invariant)
+            ).all()
+        )
+    if not cases and not summary:
+        raise HTTPException(404, "metamorphic suite not found")
+    completed = sum(item.status == "COMPLETED" for item in cases)
+    passed = sum(bool((item.result_payload or {}).get("passed")) for item in cases)
+    status = (
+        "COMPLETED"
+        if completed == len(cases) and cases
+        else "RUNNING"
+        if completed
+        else "QUEUED"
+    )
+    return {
+        **(summary or {}),
+        "suite_id": suite_id,
+        "status": status,
+        "case_count": len(cases),
+        "completed": completed,
+        "passed": passed,
+        "failed": completed - passed,
+        "cases": [
+            {
+                "case_id": item.case_id,
+                "invariant": item.invariant,
+                "status": item.status,
+                "passed": (item.result_payload or {}).get("passed"),
+                "result_digest": item.result_digest,
+                "object_path": item.object_path,
+                "checksum": item.checksum,
+                "trace_id": (item.result_payload or {}).get("trace_id", item.trace_id),
+                "delivery_count": item.delivery_count,
+                "retries": item.retries,
+            }
+            for item in cases
+        ],
+    }
+
+
+@app.post("/v1/metamorphic/cases/{case_id}/redeliver", status_code=202)
+def redeliver_metamorphic_case(case_id: str) -> dict[str, Any]:
+    with Session(repository.engine) as session:
+        case = session.get(MetamorphicCaseRecord, case_id)
+        if not case:
+            raise HTTPException(404, "metamorphic case not found")
+        original_digest = case.result_digest
+    task = execute_metamorphic_case.delay(case_id)
+    return {
+        "case_id": case_id,
+        "task_id": str(task.id),
+        "original_result_digest": original_digest,
+        "expected_idempotent": original_digest is not None,
+    }
 
 
 @app.post("/v1/metamorphic/evaluate")

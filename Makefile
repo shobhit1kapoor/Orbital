@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 COMPOSE := docker compose --env-file .env -f infra/docker-compose.yaml
 
-.PHONY: bootstrap dev down seed certify hero-demo inject-drift verify verify-obi verify-alerts campaign pause-campaign resume-campaign recover-campaign verify-campaign generate-capsules reset-demo test build signoz provision-signoz
+.PHONY: bootstrap dev down seed certify hero-demo inject-drift verify verify-obi verify-alerts campaign pause-campaign resume-campaign recover-campaign verify-campaign generate-capsules run-range verify-metamorphic reset-demo test build signoz provision-signoz
 
 bootstrap:
 	bash ./demo/bootstrap.sh
@@ -110,6 +110,20 @@ generate-capsules:
 	$(COMPOSE) --profile tools build demo-runner
 	$(COMPOSE) --profile tools run --rm --no-deps demo-runner \
 		python /workspace/demo/generate_capsules.py
+
+run-range: generate-capsules
+	$(COMPOSE) up --build -d postgres redis minio otel-collector adversarial-foundry replay-orchestrator replay-worker
+	$(COMPOSE) restart otel-collector
+	$(COMPOSE) --profile tools build demo-runner
+	$(COMPOSE) --profile tools run --rm --no-deps demo-runner \
+		python /workspace/demo/run_range.py
+
+verify-metamorphic: run-range
+	$(COMPOSE) up --build -d postgres redis minio otel-collector replay-orchestrator replay-worker
+	$(COMPOSE) restart otel-collector
+	$(COMPOSE) --profile tools build demo-runner
+	$(COMPOSE) --profile tools run --rm --no-deps demo-runner \
+		python /workspace/demo/verify_metamorphic.py
 
 reset-demo:
 	$(COMPOSE) down --remove-orphans
