@@ -47,7 +47,9 @@ verify-obi:
 	@test -r /sys/kernel/btf/vmlinux || (echo "OBI requires kernel BTF at /sys/kernel/btf/vmlinux"; exit 1)
 	@mountpoint -q /sys/fs/bpf || (echo "bpffs is not mounted; run: sudo mount -t bpf bpf /sys/fs/bpf"; exit 1)
 	$(COMPOSE) --profile obi up -d opa agent-runtime mock-mcp-tool mock-refund-service evidence-reconciler
-	$(COMPOSE) --profile obi up -d obi
+	# Recreate OBI after application services so eBPF probes attach to their
+	# current PIDs even when Compose replaced a Python service container.
+	$(COMPOSE) --profile obi up -d --force-recreate obi
 	@sleep 8
 	$(COMPOSE) --profile tools build demo-runner
 	$(COMPOSE) --profile tools run --rm --no-deps demo-runner python /workspace/demo/verify_obi.py
