@@ -24,7 +24,10 @@ OUTPUT = Path(os.getenv("ORBITAL_DEMO_OUTPUT", "data/demo-output"))
 
 
 def post(service: str, path: str, payload: dict[str, Any]) -> dict[str, Any]:
-    response = httpx.post(f"{BASE[service]}{path}", json=payload, timeout=180)
+    # First-run capsule and mutation persistence on the 8-vCPU native demo VM
+    # can exceed three minutes. Keep the infrastructure bootstrap bounded but
+    # do not treat a healthy, actively writing local service as failed.
+    response = httpx.post(f"{BASE[service]}{path}", json=payload, timeout=900)
     response.raise_for_status()
     return response.json()
 

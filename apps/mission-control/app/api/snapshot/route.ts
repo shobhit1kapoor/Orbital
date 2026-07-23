@@ -59,7 +59,7 @@ export async function GET() {
     ["certifier", `${urls.certifier}/v1/authority/frontier`],
     [
       "delegation",
-      `${urls.delegation}/v1/delegations/latest`,
+      `${urls.delegation}/v1/delegations/latest?prefer_conclusive=true`,
     ],
     [
       "verification",

@@ -16,6 +16,7 @@ from orbital_shared.campaigns import (
     stable_identifier,
     versioned_path,
 )
+from orbital_shared.corpus import build_corpus
 from orbital_shared.database import (
     AdaptiveBranchRecord,
     CapsuleRecord,
@@ -486,15 +487,27 @@ def validate(request: MutationValidationRequest) -> dict[str, Any]:
 
 @app.post("/v1/attacks/adapt")
 def adapt(request: AdaptiveRequest) -> dict[str, Any]:
+    requested_ids = set(
+        request.mutation_ids
+        or [
+            mutation.mutation_id
+            for mutation, _ in build_mutations(
+                build_corpus(),
+                DEFAULT_MUTATION_COUNT,
+                DEFAULT_MUTATION_SEED,
+            )
+        ]
+    )
     with Session(store.engine) as session:
-        query = select(MutationRecord).order_by(MutationRecord.sequence)
+        query = (
+            select(MutationRecord)
+            .where(MutationRecord.mutation_id.in_(requested_ids))
+            .order_by(MutationRecord.sequence)
+        )
         records = list(session.scalars(query).all())
-    if request.mutation_ids:
-        requested_ids = set(request.mutation_ids)
-        records = [item for item in records if item.mutation_id in requested_ids]
-        missing = sorted(requested_ids - {item.mutation_id for item in records})
-        if missing:
-            raise HTTPException(422, f"mutations are not persisted: {missing[:5]}")
+    missing = sorted(requested_ids - {item.mutation_id for item in records})
+    if missing:
+        raise HTTPException(422, f"mutations are not persisted: {missing[:5]}")
     if len(records) != 880:
         raise HTTPException(
             409, f"Phase 4B requires the complete 880-mutation catalogue; found {len(records)}"

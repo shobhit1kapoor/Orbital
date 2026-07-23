@@ -1215,7 +1215,7 @@ export default function Home() {
           <div className={`connection ${snapshot?.connected ? "online" : "offline"}`}>
             <span />{snapshot?.connected ? "EVIDENCE PLANE CONNECTED" : "EVIDENCE PLANE DEGRADED"}
           </div>
-          <small>FLIGHT ASSURANCE · PHASE 7</small>
+          <small>FLIGHT ASSURANCE · FINAL VALIDATION</small>
         </div>
       </aside>
       <div className="main-column">

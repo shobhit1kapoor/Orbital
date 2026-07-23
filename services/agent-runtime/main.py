@@ -387,12 +387,13 @@ async def evaluate_delegation_chain(request: DelegationRequest) -> dict[str, Any
 
 
 @app.get("/v1/delegations/latest")
-def latest_delegation() -> dict[str, Any] | None:
+def latest_delegation(prefer_conclusive: bool = False) -> dict[str, Any] | None:
     with Session(store.engine) as session:
+        query = select(DelegationEventRecord)
+        if prefer_conclusive:
+            query = query.where(DelegationEventRecord.evidence_state != "UNKNOWN")
         event = session.scalar(
-            select(DelegationEventRecord)
-            .order_by(DelegationEventRecord.created_at.desc())
-            .limit(1)
+            query.order_by(DelegationEventRecord.created_at.desc()).limit(1)
         )
         return event.response_payload if event else None
 

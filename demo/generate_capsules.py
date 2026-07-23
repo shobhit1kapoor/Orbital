@@ -165,6 +165,13 @@ def main() -> None:
         len(set(mutation_response["mutation_ids"])) == 880,
         "mutation IDs are not unique",
     )
+    expected_generated = build_mutations(
+        expected_capsules,
+        DEFAULT_MUTATION_COUNT,
+        DEFAULT_MUTATION_SEED,
+    )
+    expected_mutations = [item[0] for item in expected_generated]
+    expected_mutation_ids = [item.mutation_id for item in expected_mutations]
 
     engine = create_engine(os.environ["DATABASE_URL"], pool_pre_ping=True)
     with engine.connect() as connection:
@@ -186,9 +193,10 @@ def main() -> None:
                     "SELECT mutation_id, source_capsule_id, category, operator, "
                     "provenance_digest, mutation_digest, mutated_fixture_digest, "
                     "object_path, checksum, valid, reproducible, payload "
-                    "FROM replay_mutations WHERE seed=:seed ORDER BY sequence"
+                    "FROM replay_mutations "
+                    "WHERE mutation_id = ANY(:mutation_ids) ORDER BY sequence"
                 ),
-                {"seed": DEFAULT_MUTATION_SEED},
+                {"mutation_ids": expected_mutation_ids},
             ).mappings()
         ]
     require(len(capsule_rows) == 120, "PostgreSQL capsule corpus is incomplete")
@@ -225,12 +233,6 @@ def main() -> None:
     persisted_mutations = [
         ReplayMutation.model_validate(row["payload"]) for row in mutation_rows
     ]
-    expected_generated = build_mutations(
-        expected_capsules,
-        DEFAULT_MUTATION_COUNT,
-        DEFAULT_MUTATION_SEED,
-    )
-    expected_mutations = [item[0] for item in expected_generated]
     require(
         [item.mutation_id for item in persisted_mutations]
         == [item.mutation_id for item in expected_mutations],
@@ -258,6 +260,11 @@ def main() -> None:
         all(count >= 20 for count in mutation_response["operators"].values()),
         "one or more mutation operators lack coverage",
     )
+
+    with engine.connect() as connection:
+        mutation_count_before_rejection = int(
+            connection.scalar(text("SELECT count(*) FROM replay_mutations")) or 0
+        )
 
     first_payload = mutation_rows[0]["payload"]
     invalid_response = post_json(
@@ -312,7 +319,7 @@ def main() -> None:
             ).mappings()
         }
     require(
-        mutation_count_after_rejection == 880,
+        mutation_count_after_rejection == mutation_count_before_rejection,
         "rejected mutations were persisted as valid mutations",
     )
     require(
@@ -411,7 +418,12 @@ def main() -> None:
         "rejection_tests": {
             "invalid_operator": "REJECTED",
             "non_reproducible_digest": "REJECTED",
-            "valid_mutation_count_after_rejection": mutation_count_after_rejection,
+            "canonical_valid_mutations_after_rejection": len(mutation_rows),
+            "all_phase_mutations_before_rejection": mutation_count_before_rejection,
+            "all_phase_mutations_after_rejection": mutation_count_after_rejection,
+            "write_count_unchanged": (
+                mutation_count_after_rejection == mutation_count_before_rejection
+            ),
         },
         "persistence": {
             "postgres_capsules": len(capsule_rows),

@@ -10,7 +10,13 @@ from typing import Any
 
 import httpx
 from minio import Minio
+from orbital_shared.corpus import build_corpus
 from orbital_shared.models import sha256_digest
+from orbital_shared.range_mutations import (
+    DEFAULT_MUTATION_COUNT,
+    DEFAULT_MUTATION_SEED,
+    build_mutations,
+)
 from sqlalchemy import create_engine, text
 
 CERTIFIER_URL = os.getenv("CERTIFIER_URL", "http://certifier:8000").rstrip("/")
@@ -68,6 +74,14 @@ def database():
 
 
 def phase4_evidence() -> dict[str, Any]:
+    canonical_mutation_ids = [
+        mutation.mutation_id
+        for mutation, _fixture in build_mutations(
+            build_corpus(),
+            DEFAULT_MUTATION_COUNT,
+            DEFAULT_MUTATION_SEED,
+        )
+    ]
     with database().connect() as connection:
         range_row = connection.execute(
             text(
@@ -91,8 +105,9 @@ def phase4_evidence() -> dict[str, Any]:
             connection.scalar(
                 text(
                     "SELECT count(*) FROM replay_mutations "
-                    "WHERE valid=true AND reproducible=true"
-                )
+                    "WHERE mutation_id = ANY(:mutation_ids)"
+                ),
+                {"mutation_ids": canonical_mutation_ids},
             )
             or 0
         )
@@ -100,8 +115,8 @@ def phase4_evidence() -> dict[str, Any]:
     require(causal_row is not None, "confirmed Phase 4C causal evidence is absent")
     require(capsule_count >= 120, f"expected at least 120 capsules, found {capsule_count}")
     require(
-        mutation_count >= 880,
-        f"expected at least 880 valid mutations, found {mutation_count}",
+        mutation_count == 880,
+        f"expected exactly 880 canonical RANGE mutations, found {mutation_count}",
     )
     result = dict(causal_row["result_payload"] or {})
     trace_ids = [

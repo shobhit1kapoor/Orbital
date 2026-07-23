@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 COMPOSE := docker compose --env-file .env -f infra/docker-compose.yaml
 
-.PHONY: bootstrap dev down seed certify hero-demo inject-drift verify verify-obi verify-alerts campaign pause-campaign resume-campaign recover-campaign verify-campaign generate-capsules run-range verify-metamorphic causal-analysis minimize-hero-failure verify-causal phase5-services authority-frontier certify-full verify-certificate verify-clearance phase6-services delegation-demo verify-delegation test-e2e verify-ui reset-demo test build signoz provision-signoz
+.PHONY: bootstrap dev down seed certify hero-demo final-demo capture-assets capture-signoz-assets verify-release inject-drift verify verify-obi verify-alerts campaign pause-campaign resume-campaign recover-campaign verify-campaign generate-capsules run-range verify-metamorphic causal-analysis minimize-hero-failure verify-causal phase5-services authority-frontier certify-full verify-certificate verify-clearance phase6-services delegation-demo verify-delegation test-e2e verify-ui reset-demo test build signoz provision-signoz
 
 bootstrap:
 	bash ./demo/bootstrap.sh
@@ -25,6 +25,31 @@ hero-demo:
 	$(COMPOSE) up -d control-plane agent-runtime action-gateway mock-mcp-tool mock-refund-service evidence-reconciler capsule-builder replay-orchestrator adversarial-foundry causal-engine certifier watchtower
 	$(COMPOSE) --profile tools build demo-runner
 	$(COMPOSE) --profile tools run --rm demo-runner python /workspace/demo/run_hero_demo.py --phase all
+
+final-demo:
+	$(COMPOSE) up -d control-plane agent-runtime action-gateway mock-mcp-tool mock-refund-service evidence-reconciler causal-engine certifier watchtower mission-control
+	$(COMPOSE) --profile tools build demo-runner
+	$(COMPOSE) --profile tools run --rm --no-deps demo-runner \
+		python /workspace/demo/final_demo.py
+
+capture-assets:
+	mkdir -p docs/assets/mission-control
+	$(COMPOSE) up -d mission-control
+	$(COMPOSE) --profile tools build mission-control-e2e
+	$(COMPOSE) --profile tools run --rm --no-deps \
+		-v "$$(pwd)/docs/assets/mission-control:/workspace/apps/mission-control/docs-assets" \
+		mission-control-e2e node apps/mission-control/scripts/capture-assets.mjs
+
+capture-signoz-assets:
+	mkdir -p docs/assets/signoz
+	$(COMPOSE) --profile tools build mission-control-e2e
+	$(COMPOSE) --profile tools run --rm --no-deps \
+		-v "$$(pwd)/docs/assets/signoz:/workspace/apps/mission-control/signoz-assets" \
+		-v "$$(pwd)/data/demo-output:/workspace/data/demo-output:ro" \
+		mission-control-e2e node apps/mission-control/scripts/capture-signoz-assets.mjs
+
+verify-release:
+	python demo/release_audit.py
 
 provision-signoz:
 	$(COMPOSE) --profile tools run --rm -e SIGNOZ_MCP_URL=http://signoz-mcp:8000/mcp demo-runner python /workspace/demo/provision_signoz.py
@@ -140,7 +165,7 @@ minimize-hero-failure:
 	$(COMPOSE) --profile tools run --rm --no-deps demo-runner \
 		python /workspace/demo/phase4c_causal.py minimize
 
-verify-causal:
+verify-causal: causal-analysis minimize-hero-failure
 	$(COMPOSE) up --build -d postgres redis minio otel-collector causal-engine causal-worker
 	$(COMPOSE) restart otel-collector
 	$(COMPOSE) --profile tools build demo-runner
@@ -176,7 +201,7 @@ verify-certificate: phase5-services
 			-e ORBITAL_CONTAINER_DIGEST="$$agent_digest" demo-runner \
 			python /workspace/demo/phase5_clearance.py verify-certificate
 
-verify-clearance: phase5-services
+verify-clearance: authority-frontier certify-full verify-certificate
 	@set -euo pipefail; \
 		agent_digest="$$(docker image inspect infra-agent-runtime:latest --format '{{.Id}}')"; \
 		$(COMPOSE) --profile tools run --rm --no-deps \
@@ -193,7 +218,7 @@ delegation-demo: phase6-services
 		python /workspace/demo/phase6_delegation.py demo
 	@sleep 8
 
-verify-delegation: phase6-services
+verify-delegation: delegation-demo
 	$(COMPOSE) --profile tools run --rm --no-deps demo-runner \
 		python /workspace/demo/phase6_delegation.py verify
 
@@ -210,5 +235,6 @@ verify-ui:
 reset-demo:
 	$(COMPOSE) down --remove-orphans
 	-docker volume rm infra_postgres-data infra_redis-data infra_minio-data
-	-docker compose -f pours/deployment/compose.yaml down -v --remove-orphans
-	rm -rf data/demo-output missions/baseline/*.json missions/regressions/*.json
+	foundryctl forge -f casting.yaml
+	docker compose -f pours/deployment/compose.yaml down -v --remove-orphans
+	rm -rf data/demo-output missions/baseline/*.json

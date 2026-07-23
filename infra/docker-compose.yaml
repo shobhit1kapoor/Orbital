@@ -394,9 +394,12 @@ services:
       dockerfile: apps/mission-control/Dockerfile.e2e
     environment:
       PLAYWRIGHT_BASE_URL: http://mission-control:3000
+      SIGNOZ_INTERNAL_URL: http://orbital-signoz-0:8080
+      SIGNOZ_ADMIN_EMAIL: ${SIGNOZ_ADMIN_EMAIL:-orbital-admin@example.local}
+      SIGNOZ_ADMIN_PASSWORD: ${SIGNOZ_ADMIN_PASSWORD:-}
     depends_on:
       mission-control: { condition: service_healthy }
-    networks: [orbital]
+    networks: [orbital, signoz]
 
   demo-runner:
     <<: *python-service

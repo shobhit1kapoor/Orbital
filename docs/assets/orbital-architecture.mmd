@@ -1,0 +1,25 @@
+flowchart LR
+    MC["Mission Control<br/>7 live screens"] --> CP["Control Plane"]
+    CP --> A["ATLAS<br/>contract compiler"]
+    CP --> C["CAPSULE<br/>120 missions"]
+    C --> R["RANGE<br/>880 safety mutations"]
+    R --> RP["Replay workers<br/>Celery + Redis"]
+    RP --> F["FORK<br/>causal lab"]
+    F --> FR["FRONTIER<br/>6 authority levels"]
+    FR --> CL["CLEARANCE<br/>Ed25519 certificate"]
+    CL --> W["WATCHTOWER<br/>runtime attestation"]
+    AR["Agent runtime"] --> G["GATE<br/>action escrow"]
+    G --> T["Synthetic local tools"]
+    AR --> P["PARALLAX<br/>evidence reconciler"]
+    T --> P
+    OBI["OBI / eBPF"] --> P
+    OPA["OPA decisions"] --> P
+    AR & G & P & RP & F & FR & CL & W --> OTEL["OpenTelemetry Collector"]
+    OBI --> OTEL
+    OTEL --> SZ["SigNoz<br/>traces · metrics · logs · alerts"]
+    SZ --> MC
+    SZ --> W
+    PG[("PostgreSQL")] --- CP
+    PG --- RP
+    M[("MinIO")] --- C
+    M --- F
