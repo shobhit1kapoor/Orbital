@@ -1,175 +1,584 @@
 from __future__ import annotations
 
-import random
-from collections import defaultdict
+import os
 from typing import Any
 
-import numpy as np
-from orbital_semconv import ATTRIBUTES, traced
+from celery import Celery, chord, group
+from fastapi import HTTPException
+from opentelemetry import metrics
+from orbital_semconv import current_trace_ids, emit_event, traced
 from orbital_shared.api import create_service
-from orbital_shared.campaigns import versioned_path
-from orbital_shared.database import ObjectStore
-from orbital_shared.models import CausalContribution, CausalFinding, sha256_digest
-from orbital_shared.object_storage import VersionedObjectStorage
-from pydantic import BaseModel
+from orbital_shared.campaigns import (
+    deterministic_trace_id,
+    stable_identifier,
+)
+from orbital_shared.causal import (
+    FACTORS,
+    MAX_REPEATS,
+    MAX_SHAPLEY_SAMPLES,
+    MAX_TIMEBOX_SECONDS,
+    intervention_sets,
+)
+from orbital_shared.database import (
+    AdaptiveBranchRecord,
+    CausalAnalysisRecord,
+    CausalBranchRecord,
+    MinimizationAttemptRecord,
+    MinimizationRunRecord,
+    MutationRecord,
+    ObjectStore,
+    RangeCampaignRecord,
+    RangeScoreRecord,
+)
+from orbital_shared.models import sha256_digest, utcnow
+from orbital_shared.object_storage import IntegrityError, VersionedObjectStorage
+from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
 
 app = create_service("ORBITAL Σ FORK Causal Engine", "orbital-causal-engine")
 store = ObjectStore()
 objects = VersionedObjectStorage()
+meter = metrics.get_meter("orbital-causal-engine")
+analyses_created = meter.create_counter("orbital.causal.analyses.created")
+branches_queued = meter.create_counter("orbital.causal.branches.queued")
+unknown_results = meter.create_counter("orbital.causal.unknown")
+minimizations_created = meter.create_counter("orbital.causal.minimizations.created")
 
-FACTORS = [
-    "prompt_compression",
-    "stale_retrieval",
-    "tool_schema_expansion",
-    "policy_permissiveness",
-    "final_tool_execution",
-]
+
+class ModelParameters(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    model_identifier: str = "qwen3:8b"
+    temperature: int = Field(default=0, ge=0, le=0)
+    context_window: int = Field(default=8192, ge=8192, le=8192)
+    maximum_output_tokens: int = Field(default=1024, ge=1024, le=1024)
+    execution_mode: str = Field(
+        default="deterministic_simulation",
+        pattern="^deterministic_simulation$",
+    )
 
 
 class AnalyzeRequest(BaseModel):
-    replay_run_id: str
-    permutations: int = 128
-    bootstrap_samples: int = 1000
-    seed: int = 20260722
+    model_config = ConfigDict(extra="forbid")
+
+    source_mutation_id: str | None = None
+    replay_run_id: str | None = None
+    repeat_count: int = Field(default=16, ge=8, le=MAX_REPEATS)
+    shapley_samples: int = Field(default=64, ge=1, le=MAX_SHAPLEY_SAMPLES)
+    bootstrap_samples: int = Field(default=500, ge=100, le=2_000)
+    seed: int = 20260723
+    model_parameters: ModelParameters = Field(default_factory=ModelParameters)
 
 
 class MinimizeRequest(BaseModel):
-    replay_run_id: str
-    message_fragments: list[str]
-    documents: list[str]
-    memory_entries: list[str]
-    tool_fields: list[str]
+    model_config = ConfigDict(extra="ignore")
+
+    analysis_id: str | None = None
+    replay_run_id: str | None = None
+    timebox_seconds: int = Field(
+        default=MAX_TIMEBOX_SECONDS, ge=1, le=MAX_TIMEBOX_SECONDS
+    )
 
 
-def failure_probability(active: set[str]) -> float:
-    weights = {
-        "prompt_compression": 0.39,
-        "tool_schema_expansion": 0.33,
-        "stale_retrieval": 0.19,
-        "policy_permissiveness": 0.06,
-        "final_tool_execution": 0.03,
-    }
-    base = sum(weights[factor] for factor in active)
-    if {"prompt_compression", "tool_schema_expansion"} <= active:
-        base += 0.12
-    if "final_tool_execution" not in active:
-        return 0.0
-    return min(1.0, base)
+def _celery() -> Celery:
+    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    return Celery(
+        "orbital-causal-client",
+        broker=redis_url,
+        backend=os.getenv(
+            "CELERY_RESULT_BACKEND", redis_url.rsplit("/", 1)[0] + "/1"
+        ),
+    )
 
 
-@app.post("/v1/causal/analyze")
-def analyze(request: AnalyzeRequest) -> dict[str, Any]:
-    rng = random.Random(request.seed)
-    marginal: dict[str, list[float]] = defaultdict(list)
-    for _ in range(request.permutations):
-        order = FACTORS[:]
-        rng.shuffle(order)
-        active: set[str] = set()
-        prior = failure_probability(active)
-        for factor in order:
-            active.add(factor)
-            current = failure_probability(active)
-            marginal[factor].append(current - prior)
-            prior = current
-
-    contributions: list[CausalContribution] = []
-    bootstrap_rng = np.random.default_rng(request.seed)
-    for factor in FACTORS:
-        values = np.array(marginal[factor], dtype=float)
-        means = [
-            float(np.mean(bootstrap_rng.choice(values, size=len(values), replace=True)))
-            for _ in range(request.bootstrap_samples)
-        ]
-        contributions.append(
-            CausalContribution(
-                factor=factor,
-                contribution=float(np.mean(values)),
-                confidence_low=float(np.quantile(means, 0.025)),
-                confidence_high=float(np.quantile(means, 0.975)),
+def _source_evidence(
+    requested_mutation_id: str | None,
+) -> tuple[dict[str, Any] | None, list[str]]:
+    reasons: list[str] = []
+    with Session(store.engine) as session:
+        query = (
+            select(RangeScoreRecord)
+            .join(
+                RangeCampaignRecord,
+                RangeCampaignRecord.campaign_id == RangeScoreRecord.campaign_id,
             )
+            .where(
+                RangeScoreRecord.selected.is_(True),
+                RangeCampaignRecord.status == "COMPLETED",
+            )
+            .order_by(RangeScoreRecord.rank)
         )
-    total = sum(max(0, contribution.contribution) for contribution in contributions) or 1
-    for contribution in contributions:
-        contribution.contribution = max(0, contribution.contribution) / total
+        if requested_mutation_id:
+            query = query.where(
+                RangeScoreRecord.mutation_id == requested_mutation_id
+            )
+        score = session.scalar(query)
+        if not score:
+            return None, ["selected Phase 4B safety-mutation evidence is missing"]
+        campaign = session.get(RangeCampaignRecord, score.campaign_id)
+        mutation = session.get(MutationRecord, score.mutation_id)
+        branches = list(
+            session.scalars(
+                select(AdaptiveBranchRecord).where(
+                    AdaptiveBranchRecord.campaign_id == score.campaign_id,
+                    AdaptiveBranchRecord.seed_mutation_id == score.mutation_id,
+                    AdaptiveBranchRecord.status == "COMPLETED",
+                )
+            ).all()
+        )
+    failure_branches = [
+        item
+        for item in branches
+        if bool((item.result_payload or {}).get("invariant_violation_observed"))
+        and item.object_path
+        and item.checksum
+        and (item.result_payload or {}).get("trace_id")
+    ]
+    if not campaign or not mutation:
+        reasons.append("source campaign or safety-mutation metadata is missing")
+    if not failure_branches:
+        reasons.append("no reproducible Phase 4B refund invariant failure exists")
+    selection_path = (
+        (campaign.result_summary or {}).get("selection_object_path")
+        if campaign
+        else None
+    )
+    if not selection_path:
+        reasons.append("Phase 4B selection manifest reference is missing")
+    if reasons:
+        return None, reasons
+    source_branch = max(
+        failure_branches,
+        key=lambda item: (
+            float((item.result_payload or {}).get("adaptive_score", 0)),
+            item.generation,
+            item.branch_id,
+        ),
+    )
+    try:
+        selection_manifest = objects.get_json(selection_path)
+        branch_result = objects.get_json(
+            source_branch.object_path, source_branch.checksum
+        )
+    except (IntegrityError, Exception) as exc:
+        return None, [f"source object evidence unavailable: {type(exc).__name__}"]
+    if selection_manifest.get("selection_digest") != campaign.selection_digest:
+        return None, ["Phase 4B selection manifest digest is inconsistent"]
+    if sha256_digest(branch_result) != source_branch.result_digest:
+        return None, ["Phase 4B branch evidence digest is inconsistent"]
+    return {
+        "source_campaign_id": campaign.campaign_id,
+        "source_mutation_id": mutation.mutation_id,
+        "source_mutation_digest": mutation.mutation_digest,
+        "source_branch_id": source_branch.branch_id,
+        "source_branch_digest": source_branch.result_digest,
+        "source_trace_id": branch_result["trace_id"],
+        "source_object_path": source_branch.object_path,
+        "selection_digest": campaign.selection_digest,
+        "selection_object_path": selection_path,
+        "failure": "refund_declaration_authorization_mismatch",
+        "failure_signature": branch_result.get("result_digest"),
+        "local_fixture": True,
+    }, []
 
-    finding = CausalFinding(
-        replay_run_id=request.replay_run_id,
-        contributions=sorted(contributions, key=lambda item: item.contribution, reverse=True),
-        earliest_commitment_point="prompt_compression",
-        interactions={"prompt_compression×tool_schema_expansion": 0.12},
-        original_tokens=18_400,
-        minimized_tokens=712,
+
+def _analysis_payload(
+    session: Session, analysis: CausalAnalysisRecord
+) -> dict[str, Any]:
+    counts = dict(
+        session.execute(
+            select(CausalBranchRecord.status, func.count())
+            .where(CausalBranchRecord.analysis_id == analysis.analysis_id)
+            .group_by(CausalBranchRecord.status)
+        ).all()
     )
-    store.put(
-        finding.finding_id, "causal_finding", finding.model_dump(mode="json"), finding.created_at
-    )
+    return {
+        "analysis_id": analysis.analysis_id,
+        "status": analysis.status,
+        "verdict": analysis.verdict,
+        "source_campaign_id": analysis.source_campaign_id,
+        "source_mutation_id": analysis.source_mutation_id,
+        "source_branch_id": analysis.source_branch_id,
+        "source_trace_id": analysis.source_trace_id,
+        "expected_branches": analysis.expected_branches,
+        "completed_branches": analysis.completed_branches,
+        "branch_counts": counts,
+        "config": analysis.config,
+        "evidence": analysis.evidence,
+        "result": analysis.result_payload,
+        "finding_digest": analysis.finding_digest,
+        "object_path": analysis.object_path,
+        "checksum": analysis.checksum,
+        "trace_id": analysis.trace_id,
+    }
+
+
+@app.post("/v1/causal/analyze", status_code=202)
+def analyze(request: AnalyzeRequest) -> dict[str, Any]:
     with traced(
-        "causal.analyze",
+        "causal.analysis.create",
         {
-            ATTRIBUTES["execution_mode"]: "counterfactual",
             "orbital.signal.class": "causal",
-            "orbital.causal.permutations": request.permutations,
-            "orbital.causal.bootstrap_samples": request.bootstrap_samples,
-            "orbital.causal.fragility": max(
-                contribution.contribution for contribution in contributions
-            ),
-            "orbital.replay.run_id": request.replay_run_id,
+            "orbital.execution.mode": "counterfactual",
+            "orbital.causal.repeat_count": request.repeat_count,
+            "orbital.causal.shapley_samples": request.shapley_samples,
         },
     ):
-        for contribution in contributions:
-            with traced(
-                "causal.contribution",
-                {
-                    ATTRIBUTES["execution_mode"]: "counterfactual",
-                    "orbital.signal.class": "causal",
-                    "orbital.causal.factor": contribution.factor,
-                    "orbital.causal.contribution": contribution.contribution,
-                    "orbital.causal.confidence_low": contribution.confidence_low,
-                    "orbital.causal.confidence_high": contribution.confidence_high,
-                },
-            ):
-                pass
-    return finding.model_dump(mode="json")
+        trace_id, _ = current_trace_ids()
+        evidence, reasons = _source_evidence(request.source_mutation_id)
+        config = {
+            "factors": list(FACTORS),
+            "repeat_count": request.repeat_count,
+            "shapley_samples": request.shapley_samples,
+            "bootstrap_samples": request.bootstrap_samples,
+            "seed": request.seed,
+            "model_parameters": request.model_parameters.model_dump(mode="json"),
+        }
+        submission = {
+            "source": evidence
+            or {"requested_mutation_id": request.source_mutation_id, "reasons": reasons},
+            "config": config,
+            "version": "phase4c.causal.v1",
+        }
+        submission_digest = sha256_digest(submission)
+        analysis_id = stable_identifier("analysis", submission_digest)
+        now = utcnow()
+        with Session(store.engine) as session:
+            existing = session.get(CausalAnalysisRecord, analysis_id)
+            if existing:
+                pending_ids = list(
+                    session.scalars(
+                        select(CausalBranchRecord.branch_id)
+                        .where(
+                            CausalBranchRecord.analysis_id == analysis_id,
+                            CausalBranchRecord.status != "COMPLETED",
+                        )
+                        .order_by(CausalBranchRecord.branch_id)
+                    ).all()
+                )
+                if pending_ids:
+                    existing.status = "QUEUED"
+                    session.commit()
+                    client = _celery()
+                    header = group(
+                        client.signature(
+                            "orbital.causal.execute_branch",
+                            args=[branch_id],
+                            immutable=True,
+                            queue="causal",
+                        )
+                        for branch_id in pending_ids
+                    )
+                    callback = client.signature(
+                        "orbital.causal.complete_analysis",
+                        args=[analysis_id],
+                        queue="causal",
+                    )
+                    recovery = chord(header)(callback)
+                    recovery_id = str(recovery.id)
+                else:
+                    recovery_id = None
+                return _analysis_payload(session, existing) | {
+                    "duplicate_submission": True,
+                    "recovery_dispatched": bool(pending_ids),
+                    "recovered_branches": len(pending_ids),
+                    "recovery_chord_id": recovery_id,
+                }
+            if not evidence:
+                result = {
+                    "schema_version": "orbital.causal.finding/v1",
+                    "verdict": "UNKNOWN",
+                    "reason": "; ".join(reasons),
+                    "evidence_complete": False,
+                    "attribution": [],
+                    "single_effects": [],
+                    "pairwise_effects": [],
+                }
+                analysis = CausalAnalysisRecord(
+                    analysis_id=analysis_id,
+                    submission_digest=submission_digest,
+                    status="COMPLETED",
+                    verdict="UNKNOWN",
+                    expected_branches=0,
+                    completed_branches=0,
+                    config=config,
+                    evidence={"reasons": reasons},
+                    result_payload=result,
+                    trace_id=trace_id,
+                    created_at=now,
+                    completed_at=now,
+                )
+                session.add(analysis)
+                session.commit()
+                unknown_results.add(1)
+                emit_event(
+                    "causal.analysis.unknown",
+                    analysis_id=analysis_id,
+                    reasons=reasons,
+                    trace_id=trace_id,
+                )
+                return _analysis_payload(session, analysis) | {
+                    "duplicate_submission": False
+                }
+
+            combinations = intervention_sets()
+            expected = len(combinations) * request.repeat_count
+            analysis = CausalAnalysisRecord(
+                analysis_id=analysis_id,
+                submission_digest=submission_digest,
+                source_campaign_id=evidence["source_campaign_id"],
+                source_mutation_id=evidence["source_mutation_id"],
+                source_branch_id=evidence["source_branch_id"],
+                source_trace_id=evidence["source_trace_id"],
+                status="QUEUED",
+                verdict="UNKNOWN",
+                expected_branches=expected,
+                completed_branches=0,
+                config=config,
+                evidence=evidence,
+                result_payload={},
+                trace_id=trace_id,
+                created_at=now,
+            )
+            session.add(analysis)
+            session.flush()
+            branch_ids: list[str] = []
+            for interventions in combinations:
+                intervention_digest = sha256_digest(list(interventions))
+                kind = (
+                    "baseline"
+                    if not interventions
+                    else "single"
+                    if len(interventions) == 1
+                    else "pairwise"
+                )
+                for repeat in range(request.repeat_count):
+                    branch_seed = request.seed + repeat
+                    branch_id = stable_identifier(
+                        "causebranch",
+                        [
+                            analysis_id,
+                            intervention_digest,
+                            repeat,
+                            branch_seed,
+                        ],
+                    )
+                    branch_ids.append(branch_id)
+                    session.add(
+                        CausalBranchRecord(
+                            branch_id=branch_id,
+                            analysis_id=analysis_id,
+                            intervention_digest=intervention_digest,
+                            interventions=list(interventions),
+                            branch_kind=kind,
+                            repeat_index=repeat,
+                            seed=branch_seed,
+                            model_parameters=request.model_parameters.model_dump(
+                                mode="json"
+                            ),
+                            trace_id=deterministic_trace_id(branch_id),
+                            status="QUEUED",
+                            delivery_count=0,
+                            retries=0,
+                            created_at=now,
+                        )
+                    )
+            session.commit()
+
+        client = _celery()
+        header = group(
+            client.signature(
+                "orbital.causal.execute_branch",
+                args=[branch_id],
+                immutable=True,
+                queue="causal",
+            )
+            for branch_id in branch_ids
+        )
+        callback = client.signature(
+            "orbital.causal.complete_analysis",
+            args=[analysis_id],
+            queue="causal",
+        )
+        result = chord(header)(callback)
+        analyses_created.add(1)
+        branches_queued.add(expected)
+        emit_event(
+            "causal.analysis.dispatched",
+            analysis_id=analysis_id,
+            branches=expected,
+            chord_id=result.id,
+            trace_id=trace_id,
+        )
+    return {
+        "analysis_id": analysis_id,
+        "status": "QUEUED",
+        "verdict": "UNKNOWN",
+        "expected_branches": expected,
+        "source_mutation_id": evidence["source_mutation_id"],
+        "source_branch_id": evidence["source_branch_id"],
+        "source_trace_id": evidence["source_trace_id"],
+        "trace_id": trace_id,
+        "celery_chord_id": str(result.id),
+        "duplicate_submission": False,
+    }
 
 
-@app.post("/v1/causal/minimize")
+@app.get("/v1/causal/analyses/{analysis_id}")
+def analysis_status(analysis_id: str) -> dict[str, Any]:
+    with Session(store.engine) as session:
+        analysis = session.get(CausalAnalysisRecord, analysis_id)
+        if not analysis:
+            raise HTTPException(404, "causal analysis not found")
+        return _analysis_payload(session, analysis)
+
+
+@app.post(
+    "/v1/causal/analyses/{analysis_id}/branches/{branch_id}/redeliver",
+    status_code=202,
+)
+def redeliver_branch(analysis_id: str, branch_id: str) -> dict[str, Any]:
+    with Session(store.engine) as session:
+        branch = session.get(CausalBranchRecord, branch_id)
+        if not branch or branch.analysis_id != analysis_id:
+            raise HTTPException(404, "causal branch not found")
+        digest = branch.result_digest
+    task = _celery().send_task(
+        "orbital.causal.execute_branch", args=[branch_id], queue="causal"
+    )
+    return {
+        "branch_id": branch_id,
+        "task_id": str(task.id),
+        "original_result_digest": digest,
+        "expected_idempotent": digest is not None,
+    }
+
+
+@app.post("/v1/causal/minimize", status_code=202)
 def minimize(request: MinimizeRequest) -> dict[str, Any]:
-    required_markers = ("refund", "policy", "schema", "approval")
-
-    def reduce(items: list[str]) -> list[str]:
-        retained = [
-            item for item in items if any(marker in item.lower() for marker in required_markers)
-        ]
-        return retained[:1] if retained else items[:1]
-
-    minimized = {
-        "message_fragments": reduce(request.message_fragments),
-        "documents": reduce(request.documents),
-        "memory_entries": reduce(request.memory_entries),
-        "tool_fields": reduce(request.tool_fields),
-    }
-    capsule_id = f"regression-{request.replay_run_id}"
-    payload = {
-        "capsule_id": capsule_id,
-        "source_run_id": request.replay_run_id,
-        "minimized": minimized,
-        "property": "removing_any_retained_element_eliminates_failure",
-    }
-    store.put(
-        capsule_id,
-        "regression_capsule",
-        payload,
-        __import__("datetime").datetime.now(__import__("datetime").UTC),
+    with Session(store.engine) as session:
+        if request.analysis_id:
+            analysis = session.get(CausalAnalysisRecord, request.analysis_id)
+        else:
+            analysis = session.scalar(
+                select(CausalAnalysisRecord)
+                .where(
+                    CausalAnalysisRecord.status == "COMPLETED",
+                    CausalAnalysisRecord.verdict == "CONFIRMED",
+                )
+                .order_by(CausalAnalysisRecord.completed_at.desc())
+            )
+        if not analysis:
+            raise HTTPException(409, "confirmed primary causal analysis is unavailable")
+        analysis_id = analysis.analysis_id
+        minimization_id = stable_identifier(
+            "minhero",
+            [
+                analysis_id,
+                request.timebox_seconds,
+                "phase4c.hero-minimizer.v1",
+            ],
+        )
+        existing = session.get(MinimizationRunRecord, minimization_id)
+        if existing:
+            return {
+                "minimization_id": minimization_id,
+                "analysis_id": analysis_id,
+                "status": existing.status,
+                "verdict": existing.verdict,
+                "result": existing.result_payload,
+                "trace_id": existing.trace_id,
+                "duplicate_submission": True,
+            }
+        now = utcnow()
+        run = MinimizationRunRecord(
+            minimization_id=minimization_id,
+            analysis_id=analysis_id,
+            status="QUEUED",
+            verdict="UNKNOWN",
+            timebox_seconds=request.timebox_seconds,
+            trace_id=deterministic_trace_id(minimization_id),
+            delivery_count=0,
+            source_digest=analysis.finding_digest or sha256_digest(analysis.evidence),
+            result_payload={},
+            created_at=now,
+        )
+        session.add(run)
+        session.commit()
+        run_trace_id = run.trace_id
+    task = _celery().send_task(
+        "orbital.causal.minimize_hero",
+        args=[minimization_id],
+        queue="causal",
     )
-    digest = sha256_digest(payload)
-    object_path = versioned_path(
-        "minimized-regressions",
-        capsule_id,
-        digest,
-        "capsule.json",
+    minimizations_created.add(1)
+    return {
+        "minimization_id": minimization_id,
+        "analysis_id": analysis_id,
+        "status": "QUEUED",
+        "verdict": "UNKNOWN",
+        "timebox_seconds": request.timebox_seconds,
+        "trace_id": run_trace_id,
+        "celery_task_id": str(task.id),
+        "duplicate_submission": False,
+    }
+
+
+@app.get("/v1/causal/minimizations/{minimization_id}")
+def minimization_status(minimization_id: str) -> dict[str, Any]:
+    with Session(store.engine) as session:
+        run = session.get(MinimizationRunRecord, minimization_id)
+        if not run:
+            raise HTTPException(404, "hero minimization not found")
+        attempts = int(
+            session.scalar(
+                select(func.count())
+                .select_from(MinimizationAttemptRecord)
+                .where(
+                    MinimizationAttemptRecord.minimization_id == minimization_id
+                )
+            )
+            or 0
+        )
+        return {
+            "minimization_id": run.minimization_id,
+            "analysis_id": run.analysis_id,
+            "status": run.status,
+            "verdict": run.verdict,
+            "timebox_seconds": run.timebox_seconds,
+            "attempt_count": attempts,
+            "result": run.result_payload,
+            "result_digest": run.result_digest,
+            "object_path": run.object_path,
+            "checksum": run.checksum,
+            "regression_path": run.regression_path,
+            "trace_id": run.trace_id,
+            "delivery_count": run.delivery_count,
+        }
+
+
+@app.post(
+    "/v1/causal/minimizations/{minimization_id}/redeliver",
+    status_code=202,
+)
+def redeliver_minimization(minimization_id: str) -> dict[str, Any]:
+    with Session(store.engine) as session:
+        run = session.get(MinimizationRunRecord, minimization_id)
+        if not run:
+            raise HTTPException(404, "hero minimization not found")
+        digest = run.result_digest
+    task = _celery().send_task(
+        "orbital.causal.minimize_hero",
+        args=[minimization_id],
+        queue="causal",
     )
-    objects.put_json(object_path, "minimized_regression", capsule_id, payload)
-    return payload | {"object_path": object_path, "checksum": digest}
+    return {
+        "minimization_id": minimization_id,
+        "task_id": str(task.id),
+        "original_result_digest": digest,
+        "expected_idempotent": digest is not None,
+    }
 
 
 @app.get("/v1/causal/findings")

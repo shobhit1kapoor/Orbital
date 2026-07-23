@@ -261,12 +261,46 @@ services:
   causal-engine:
     <<: *python-service
     build: { context: .., dockerfile: infra/Dockerfile.service, args: { SERVICE: causal-engine } }
+    volumes: ["../missions:/workspace/missions"]
     ports: ["8008:8000"]
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
       minio: { condition: service_healthy }
       otel-collector: { condition: service_healthy }
+
+  causal-worker:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.service
+      args: { SERVICE: causal-engine }
+    env_file:
+      - path: ../.env
+        required: false
+    restart: unless-stopped
+    command:
+      [
+        "sh",
+        "-c",
+        "cd /workspace/services/causal-engine && celery -A worker.app worker --loglevel=INFO --queues=causal --concurrency=${CAUSAL_WORKER_CONCURRENCY:-4}",
+      ]
+    volumes: ["../missions:/workspace/missions"]
+    networks: [orbital]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      minio: { condition: service_healthy }
+      otel-collector: { condition: service_healthy }
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "cd /workspace/services/causal-engine && celery -A worker.app inspect ping --destination celery@$$HOSTNAME --timeout 3 | grep -q pong",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
 
   certifier:
     <<: *python-service

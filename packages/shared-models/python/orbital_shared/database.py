@@ -202,6 +202,116 @@ class MetamorphicCaseRecord(Base):
     )
 
 
+class CausalAnalysisRecord(Base):
+    __tablename__ = "causal_analyses"
+
+    analysis_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    submission_digest: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    source_campaign_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    source_mutation_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    source_branch_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    source_trace_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    verdict: Mapped[str] = mapped_column(String(32), index=True)
+    expected_branches: Mapped[int] = mapped_column(Integer, default=0)
+    completed_branches: Mapped[int] = mapped_column(Integer, default=0)
+    config: Mapped[dict[str, Any]] = mapped_column(JSON)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON)
+    result_payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    finding_digest: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    object_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    checksum: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    trace_id: Mapped[str] = mapped_column(String(32), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class CausalBranchRecord(Base):
+    __tablename__ = "causal_branches"
+    __table_args__ = (
+        UniqueConstraint(
+            "analysis_id",
+            "intervention_digest",
+            "repeat_index",
+            name="uq_causal_branch_input",
+        ),
+    )
+
+    branch_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    analysis_id: Mapped[str] = mapped_column(
+        ForeignKey("causal_analyses.analysis_id", ondelete="CASCADE"), index=True
+    )
+    intervention_digest: Mapped[str] = mapped_column(String(80), index=True)
+    interventions: Mapped[list[str]] = mapped_column(JSON)
+    branch_kind: Mapped[str] = mapped_column(String(32), index=True)
+    repeat_index: Mapped[int] = mapped_column(Integer)
+    seed: Mapped[int] = mapped_column(Integer)
+    model_parameters: Mapped[dict[str, Any]] = mapped_column(JSON)
+    trace_id: Mapped[str] = mapped_column(String(32), index=True)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    delivery_count: Mapped[int] = mapped_column(Integer, default=0)
+    retries: Mapped[int] = mapped_column(Integer, default=0)
+    result_payload: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    result_digest: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    object_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    checksum: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class MinimizationRunRecord(Base):
+    __tablename__ = "hero_minimizations"
+
+    minimization_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    analysis_id: Mapped[str] = mapped_column(
+        ForeignKey("causal_analyses.analysis_id", ondelete="CASCADE"),
+        unique=True,
+        index=True,
+    )
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    verdict: Mapped[str] = mapped_column(String(32), index=True)
+    timebox_seconds: Mapped[int] = mapped_column(Integer)
+    trace_id: Mapped[str] = mapped_column(String(32), index=True)
+    delivery_count: Mapped[int] = mapped_column(Integer, default=0)
+    source_digest: Mapped[str] = mapped_column(String(80))
+    result_payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    result_digest: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    object_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    checksum: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    regression_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class MinimizationAttemptRecord(Base):
+    __tablename__ = "hero_minimization_attempts"
+    __table_args__ = (
+        UniqueConstraint(
+            "minimization_id", "sequence", name="uq_minimization_attempt_sequence"
+        ),
+    )
+
+    attempt_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    minimization_id: Mapped[str] = mapped_column(
+        ForeignKey("hero_minimizations.minimization_id", ondelete="CASCADE"),
+        index=True,
+    )
+    sequence: Mapped[int] = mapped_column(Integer)
+    category: Mapped[str] = mapped_column(String(64), index=True)
+    removed_ids: Mapped[list[str]] = mapped_column(JSON)
+    candidate_size: Mapped[int] = mapped_column(Integer)
+    failure_preserved: Mapped[bool] = mapped_column(Boolean)
+    result_signature: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    trace_id: Mapped[str] = mapped_column(String(32), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class StorageObjectRecord(Base):
     __tablename__ = "storage_objects"
 

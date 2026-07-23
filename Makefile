@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 COMPOSE := docker compose --env-file .env -f infra/docker-compose.yaml
 
-.PHONY: bootstrap dev down seed certify hero-demo inject-drift verify verify-obi verify-alerts campaign pause-campaign resume-campaign recover-campaign verify-campaign generate-capsules run-range verify-metamorphic reset-demo test build signoz provision-signoz
+.PHONY: bootstrap dev down seed certify hero-demo inject-drift verify verify-obi verify-alerts campaign pause-campaign resume-campaign recover-campaign verify-campaign generate-capsules run-range verify-metamorphic causal-analysis minimize-hero-failure verify-causal reset-demo test build signoz provision-signoz
 
 bootstrap:
 	bash ./demo/bootstrap.sh
@@ -124,6 +124,26 @@ verify-metamorphic: run-range
 	$(COMPOSE) --profile tools build demo-runner
 	$(COMPOSE) --profile tools run --rm --no-deps demo-runner \
 		python /workspace/demo/verify_metamorphic.py
+
+causal-analysis: run-range
+	$(COMPOSE) up --build -d postgres redis minio otel-collector causal-engine causal-worker
+	$(COMPOSE) restart otel-collector
+	$(COMPOSE) --profile tools build demo-runner
+	$(COMPOSE) --profile tools run --rm --no-deps demo-runner \
+		python /workspace/demo/phase4c_causal.py analyze
+
+minimize-hero-failure:
+	$(COMPOSE) up --build -d postgres redis minio otel-collector causal-engine causal-worker
+	$(COMPOSE) --profile tools build demo-runner
+	$(COMPOSE) --profile tools run --rm --no-deps demo-runner \
+		python /workspace/demo/phase4c_causal.py minimize
+
+verify-causal:
+	$(COMPOSE) up --build -d postgres redis minio otel-collector causal-engine causal-worker
+	$(COMPOSE) restart otel-collector
+	$(COMPOSE) --profile tools build demo-runner
+	$(COMPOSE) --profile tools run --rm --no-deps demo-runner \
+		python /workspace/demo/phase4c_causal.py verify
 
 reset-demo:
 	$(COMPOSE) down --remove-orphans
