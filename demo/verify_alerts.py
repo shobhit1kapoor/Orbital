@@ -75,6 +75,7 @@ def emit_critical_signals(
         ATTRIBUTES["certificate_id"]: certificate_id,
         ATTRIBUTES["candidate_id"]: candidate_id,
         ATTRIBUTES["execution_mode"]: "controlled_fault_injection",
+        ATTRIBUTES["risk_class"]: "critical",
         "orbital.baseline.candidate.id": baseline_candidate_id,
         "orbital.phase": "phase2-live-alerts",
     }
@@ -189,27 +190,41 @@ async def verify() -> dict[str, Any]:
         },
     )
 
-    started_ms = int(time.time() * 1000)
-    trace_ids = emit_critical_signals(
-        canary["certificate_id"],
-        canary["candidate_id"],
-        baseline["candidate_id"],
-    )
-
     async with streamable_http_client(MCP_URL) as (read, write, _):
         async with ClientSession(read, write) as session:
             await session.initialize()
-            listing = result_json(
-                await session.call_tool(
-                    "signoz_list_alert_rules", {"limit": 1000, "offset": 0}
+            rules: dict[str, dict[str, Any]] = {}
+            quiet_deadline = time.monotonic() + 180
+            while time.monotonic() < quiet_deadline:
+                listing = result_json(
+                    await session.call_tool(
+                        "signoz_list_alert_rules", {"limit": 1000, "offset": 0}
+                    )
                 )
-            )
-            rules = {
-                item["alert"]: item
-                for item in listing.get("data", [])
-                if item.get("alert") in critical_names
-            }
+                rules = {
+                    item["alert"]: item
+                    for item in listing.get("data", [])
+                    if item.get("alert") in critical_names
+                }
+                if set(rules) == critical_names and all(
+                    item.get("state") in {"inactive", "nodata"} for item in rules.values()
+                ):
+                    break
+                await asyncio.sleep(10)
             require(set(rules) == critical_names, "one or more critical rules are absent")
+            require(
+                all(
+                    item.get("state") in {"inactive", "nodata"} for item in rules.values()
+                ),
+                "critical alert rules did not return to a quiet state",
+            )
+
+            started_ms = int(time.time() * 1000)
+            trace_ids = emit_critical_signals(
+                canary["certificate_id"],
+                canary["candidate_id"],
+                baseline["candidate_id"],
+            )
 
             histories: dict[str, dict[str, Any]] = {}
             deadline = time.monotonic() + 240

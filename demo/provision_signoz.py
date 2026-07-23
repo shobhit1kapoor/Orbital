@@ -122,7 +122,7 @@ def alert_payload(alert: dict) -> dict:
         "labels": {"system": "orbital-sigma", "severity": severity},
         "evaluation": {
             "kind": "rolling",
-            "spec": {"frequency": "1m", "evalWindow": "5m"},
+            "spec": {"frequency": "1m", "evalWindow": "1m"},
         },
         "notificationSettings": {
             "usePolicy": False,
