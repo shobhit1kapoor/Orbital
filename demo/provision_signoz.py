@@ -130,6 +130,8 @@ def alert_payload(alert: dict) -> dict:
         },
         "notificationSettings": {
             "usePolicy": False,
+            "groupBy": ["trace_id", "orbital.certificate.id"],
+            "newGroupEvalDelay": "0s",
             "renotify": {"enabled": False},
         },
         "condition": {
