@@ -13,9 +13,8 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from opentelemetry import metrics, trace
 from orbital_semconv import ATTRIBUTES, configure_telemetry, current_trace_ids, traced
+from orbital_shared.webhooks import sign_payload
 from run_hero_demo import BASE, artifact
-
-from services.watchtower.security import sign_payload
 
 MCP_URL = os.getenv("SIGNOZ_MCP_URL", "http://signoz-mcp:8000/mcp")
 CLICKHOUSE_URL = os.getenv(

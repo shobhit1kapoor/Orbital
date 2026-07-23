@@ -10,8 +10,7 @@ from fastapi import Depends, HTTPException
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from orbital_semconv import ATTRIBUTES, traced
 from orbital_shared.api import create_service
-
-from services.watchtower.security import normalize_signoz_payload, sign_payload
+from orbital_shared.webhooks import normalize_signoz_payload, sign_payload
 
 app = create_service("ORBITAL Sigma Signed Webhook Relay", "orbital-watchtower-relay")
 security = HTTPBasic()

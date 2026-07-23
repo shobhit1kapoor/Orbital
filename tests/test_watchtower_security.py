@@ -1,4 +1,4 @@
-from services.watchtower.security import (
+from orbital_shared.webhooks import (
     normalize_signoz_payload,
     sign_payload,
     verify_signature,

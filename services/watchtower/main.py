@@ -9,10 +9,9 @@ from orbital_semconv import ATTRIBUTES, SPANS, current_trace_ids, traced
 from orbital_shared.api import create_service
 from orbital_shared.database import ObjectStore, RolloutState
 from orbital_shared.models import AttestationEvent, utcnow
+from orbital_shared.webhooks import canonical_payload, verify_signature
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-
-from services.watchtower.security import canonical_payload, verify_signature
 
 app = create_service("ORBITAL Σ WATCHTOWER", "orbital-watchtower")
 store = ObjectStore()
