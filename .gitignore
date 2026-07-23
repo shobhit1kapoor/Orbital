@@ -21,5 +21,6 @@ secrets/
 *.key
 *.db
 *.sqlite3
+*.tsbuildinfo
 playwright-report/
 test-results/
