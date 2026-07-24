@@ -122,19 +122,6 @@ services:
       timeout: 3s
       retries: 20
 
-  signoz-mcp:
-    image: signoz/signoz-mcp-server:latest
-    environment:
-      TRANSPORT_MODE: http
-      MCP_SERVER_PORT: 8000
-      SIGNOZ_URL: http://orbital-signoz-0:8080
-      SIGNOZ_API_KEY: ${SIGNOZ_API_KEY:-}
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
-      LOG_LEVEL: info
-    ports: ["18000:8000"]
-    depends_on: [otel-collector]
-    networks: [orbital, signoz]
-
   control-plane:
     <<: *python-service
     build: { context: .., dockerfile: infra/Dockerfile.service, args: { SERVICE: control-plane } }
@@ -419,7 +406,7 @@ services:
       CERTIFIER_URL: http://certifier:8000
       WATCHTOWER_URL: http://watchtower:8000
       WATCHTOWER_RELAY_URL: http://watchtower-relay:8000
-      SIGNOZ_MCP_URL: http://signoz-mcp:8000/mcp
+      SIGNOZ_MCP_URL: http://orbital-mcp:8000/mcp
       SIGNOZ_CLICKHOUSE_URL: http://orbital-telemetrystore-clickhouse-0-0:8123
       SIGNOZ_PUBLIC_URL: http://localhost:8080
       ORBITAL_WEBHOOK_SECRET: ${ORBITAL_WEBHOOK_SECRET:-development-only}

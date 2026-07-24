@@ -104,7 +104,7 @@ SigNoz is the source of truth for execution evidence—not a dashboard added aft
 - ClickHouse SQL derives evidence parity, mission clusters, causal aggregates, authority frontiers, and drift history.
 - Live alerts deliver signed webhooks to WATCHTOWER.
 - Every important Mission Control result links back to a SigNoz trace, dashboard, query, or alert.
-- `casting.yaml` and `casting.yaml.lock` reproduce the five dashboards, alert rules, and saved views.
+- Foundry uses `casting.yaml` and `casting.yaml.lock` to reproduce the SigNoz and MCP deployment. ORBITAL's idempotent provisioning script creates the dashboards, alert rules, and saved views.
 
 ## Quick start for judges
 
@@ -125,7 +125,7 @@ make reset-demo
 make bootstrap
 ```
 
-`make bootstrap` generates local development secrets, applies `casting.yaml`, starts the stack, applies migrations, provisions SigNoz assets, and verifies health. Private development keys and `.env` are ignored.
+`make bootstrap` generates local development secrets, uses Foundry to reproduce SigNoz and its MCP server from `casting.yaml`, starts ORBITAL, applies migrations, idempotently provisions dashboards, alerts, and saved views, and verifies health. Private development keys and `.env` are ignored.
 
 Run the authoritative checks:
 

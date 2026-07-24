@@ -199,7 +199,7 @@ def result_json(result: object) -> dict:
 
 
 async def main(inspect_tools: bool = False) -> None:
-    url = os.getenv("SIGNOZ_MCP_URL", "http://localhost:18000/mcp")
+    url = os.getenv("SIGNOZ_MCP_URL", "http://localhost:8000/mcp")
     output = {"dashboards": [], "alerts": [], "errors": []}
     async with streamable_http_client(url) as (read, write, _):
         async with ClientSession(read, write) as session:

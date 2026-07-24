@@ -33,6 +33,11 @@ if [[ "${ollama_mode}" == "local" ]]; then
   compose+=(--profile local-llm)
 fi
 
+# Foundry's generated Compose deployment resolves this placeholder from the
+# process environment. A clean install receives the real key after SigNoz
+# account bootstrap, then recasts the managed MCP service below.
+SIGNOZ_API_KEY="$(sed -n 's/^SIGNOZ_API_KEY=//p' .env | tail -n 1)"
+export SIGNOZ_API_KEY
 foundryctl cast -f casting.yaml
 "${compose[@]}" up --build -d
 "${compose[@]}" --profile tools build demo-runner
@@ -40,7 +45,10 @@ foundryctl cast -f casting.yaml
   -e SIGNOZ_URL=http://orbital-signoz-0:8080 \
   -e ORBITAL_ENV_FILE=/workspace/.env \
   demo-runner python /workspace/demo/bootstrap_signoz.py
-"${compose[@]}" up -d --force-recreate signoz-mcp
+SIGNOZ_API_KEY="$(sed -n 's/^SIGNOZ_API_KEY=//p' .env | tail -n 1)"
+export SIGNOZ_API_KEY
+test -n "${SIGNOZ_API_KEY}" || { echo "SigNoz API key bootstrap failed."; exit 1; }
+foundryctl cast -f casting.yaml
 if [[ "${ollama_mode}" == "local" ]]; then
   "${compose[@]}" exec -T ollama ollama pull qwen3:8b
 else
@@ -49,7 +57,7 @@ fi
 "${compose[@]}" --profile tools run --rm \
   demo-runner python /workspace/demo/wait_for_services.py
 "${compose[@]}" --profile tools run --rm \
-  -e SIGNOZ_MCP_URL=http://signoz-mcp:8000/mcp \
+  -e SIGNOZ_MCP_URL=http://orbital-mcp:8000/mcp \
   demo-runner python /workspace/demo/provision_signoz.py
 "${compose[@]}" --profile tools run --rm \
   demo-runner python /workspace/demo/run_hero_demo.py --phase seed

@@ -52,7 +52,7 @@ verify-release:
 	python demo/release_audit.py
 
 provision-signoz:
-	$(COMPOSE) --profile tools run --rm -e SIGNOZ_MCP_URL=http://signoz-mcp:8000/mcp demo-runner python /workspace/demo/provision_signoz.py
+	$(COMPOSE) --profile tools run --rm -e SIGNOZ_MCP_URL=http://orbital-mcp:8000/mcp demo-runner python /workspace/demo/provision_signoz.py
 
 inject-drift:
 	$(COMPOSE) --profile tools run --rm demo-runner python /workspace/demo/run_hero_demo.py --phase drift
@@ -84,7 +84,7 @@ verify-obi:
 verify-alerts:
 	@test "$$(uname -s)" = "Linux" || (echo "Live SigNoz alert verification requires Linux"; exit 1)
 	$(COMPOSE) --profile tools build control-plane watchtower watchtower-relay demo-runner
-	$(COMPOSE) up -d control-plane watchtower watchtower-relay signoz-mcp
+	$(COMPOSE) up -d control-plane watchtower watchtower-relay
 	$(MAKE) provision-signoz
 	@set -euo pipefail; \
 		$(COMPOSE) --profile obi up -d --force-recreate obi; \

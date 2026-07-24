@@ -6,3 +6,8 @@ spec:
   deployment:
     flavor: compose
     mode: docker
+  mcp:
+    spec:
+      enabled: true
+      env:
+        SIGNOZ_API_KEY: ${SIGNOZ_API_KEY}

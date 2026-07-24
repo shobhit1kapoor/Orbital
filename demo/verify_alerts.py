@@ -16,7 +16,7 @@ from orbital_semconv import ATTRIBUTES, configure_telemetry, current_trace_ids, 
 from orbital_shared.webhooks import sign_payload
 from run_hero_demo import BASE, artifact
 
-MCP_URL = os.getenv("SIGNOZ_MCP_URL", "http://signoz-mcp:8000/mcp")
+MCP_URL = os.getenv("SIGNOZ_MCP_URL", "http://orbital-mcp:8000/mcp")
 CLICKHOUSE_URL = os.getenv(
     "SIGNOZ_CLICKHOUSE_URL", "http://orbital-telemetrystore-clickhouse-0-0:8123"
 )

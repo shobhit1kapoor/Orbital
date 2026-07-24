@@ -54,7 +54,7 @@ SigNoz is the project’s execution-evidence source of truth:
 - ClickHouse SQL derives evidence parity, coverage, causal aggregates, authority frontiers, and drift history.
 - Five dashboards cover readiness, evidence, causal analysis, authority, and certified production.
 - Critical alerts deliver signed webhooks to WATCHTOWER.
-- Foundry reproduces the saved views, dashboards, and alert rules from `casting.yaml` and its lock file.
+- Foundry reproduces the SigNoz and MCP deployment from `casting.yaml` and its lock file. ORBITAL's idempotent provisioning script creates the dashboards, alerts, and saved views.
 
 Without SigNoz, ORBITAL could repeat an application’s own claims. With SigNoz, it can compare claims against independent execution evidence and attach every certificate decision to inspectable proof.
 
